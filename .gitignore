@@ -5,3 +5,10 @@ node_modules/
 .env.development.local
 .env.test.local
 .env.production.local
+
+
+# SQLite database files
+*.db
+*.db-journal
+*.db-wal
+*.db-shm

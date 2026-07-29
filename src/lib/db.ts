@@ -1,6 +1,29 @@
 import Database from 'better-sqlite3';
 import path from 'path';
 
+// Existing DB initialization (retained as you have it)
+const db = new Database(path.join(process.cwd(), 'yorbis.db'));
+
+// Add these explicit query helpers for prospects:
+export function getProspectsByStage(stage: string) {
+  const stmt = db.prepare(`
+    SELECT * FROM prospects 
+    WHERE stage = ? 
+    ORDER BY created_at DESC
+  `);
+  return stmt.all(stage);
+}
+
+export function getAllProspects() {
+  const stmt = db.prepare(`
+    SELECT * FROM prospects 
+    ORDER BY created_at DESC
+  `);
+  return stmt.all();
+}
+
+
+
 // --- COMPREHENSIVE TYPES & INTERFACES ---
 export interface Prospect {
   id: number;

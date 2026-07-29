@@ -1,20 +1,20 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { getAllProspects, getProspectsByStage } from '@/lib/db';
 import { dbService } from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
 
+
+
 // GET /api/prospects?stage=NEW
 export async function GET(req: NextRequest) {
   try {
-    const { searchParams } = new URL(req.url);
-    const stage = searchParams.get('stage');
+    const stage = req.nextUrl.searchParams.get('stage');
 
-    let prospects = dbService.getAllProspects();
-
-    // Filter by stage if requested and not "ALL"
-    if (stage && stage !== 'ALL') {
-      prospects = prospects.filter((p: any) => p.stage === stage);
-    }
+    // Query SQLite directly via db.ts helpers
+    const prospects = (stage && stage !== 'ALL')
+      ? getProspectsByStage(stage)
+      : getAllProspects();
 
     return NextResponse.json({ success: true, prospects });
   } catch (error: any) {
