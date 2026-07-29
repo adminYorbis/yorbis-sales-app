@@ -1,4 +1,5 @@
 import { signIn } from '@/auth';
+import { ensureAuthSchema } from '@/lib/auth-migration';
 import { redirect } from 'next/navigation';
 import styles from './login.module.css';
 
@@ -10,6 +11,7 @@ export default async function LoginPage({ searchParams }: { searchParams: Promis
     'use server';
     const email = String(formData.get('email') || '').trim().toLowerCase();
     if (!approvedEmails.has(email)) redirect('/login?error=AccessDenied');
+    await ensureAuthSchema();
     await signIn('resend', {
       email,
       redirectTo: '/',
