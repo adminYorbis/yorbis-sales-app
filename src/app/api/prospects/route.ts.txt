@@ -1,0 +1,25 @@
+import { NextRequest, NextResponse } from 'next/server';
+import { updateProspectStage } from '@/lib/db';
+
+export async function PATCH(req: NextRequest) {
+  try {
+    const { id, stage } = await req.json();
+
+    if (!id || !stage) {
+      return NextResponse.json(
+        { success: false, error: 'Missing required fields: id and stage' },
+        { status: 400 }
+      );
+    }
+
+    updateProspectStage(id, stage);
+
+    return NextResponse.json({ success: true, message: 'Stage updated successfully' });
+  } catch (error: any) {
+    console.error('Error updating prospect stage:', error);
+    return NextResponse.json(
+      { success: false, error: error.message || 'Failed to update stage' },
+      { status: 500 }
+    );
+  }
+}
