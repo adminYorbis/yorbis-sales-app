@@ -8,9 +8,9 @@ export async function GET(
 ) {
   try {
     const { id } = await params;
-    const prospectId = parseInt(id, 10);
+    const prospectId = id;
 
-    const prospect = dbService.getProspectById(prospectId);
+    const prospect = await dbService.getProspectById(prospectId);
 
     if (!prospect) {
       return NextResponse.json(
@@ -39,9 +39,9 @@ export async function POST(
 ) {
   try {
     const { id } = await params;
-    const prospectId = parseInt(id, 10);
+    const prospectId = id;
 
-    const prospect = dbService.getProspectById(prospectId);
+    const prospect = await dbService.getProspectById(prospectId);
 
     if (!prospect) {
       return NextResponse.json(
@@ -50,14 +50,14 @@ export async function POST(
       );
     }
 
-    const companyOrName = prospect.company || prospect.name;
+    const companyOrName = prospect.company_name;
     const website = prospect.website || undefined;
 
     // Call Gemini using the correct import
     const brief = await geminiService.generateResearchBrief(companyOrName, website);
 
     // Save research brief to SQLite
-    dbService.updateProspect(prospectId, {
+    await dbService.updateProspect(prospectId, {
       research_brief: brief,
       research_status: 'COMPLETED',
     });

@@ -1,4 +1,23 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Yorbis Prospect Intelligence
+
+Private, CEO-first prospect discovery for Yorbis. The application uses Gemini-grounded research, Turso persistence, and Auth.js email-link access.
+
+Approved login addresses:
+
+- `sun@yorbisapp.com`
+- `anant@yorbisapp.com`
+
+## Production environment
+
+Configure every variable listed in `.env.example` in Vercel. Never commit real credentials.
+
+`AUTH_EMAIL_FROM` must use a sender/domain verified in Resend. Generate `AUTH_SECRET` with a cryptographically secure random value.
+
+## Data setup
+
+The app creates the required Turso tables on first authenticated use. Running `npm run seed` initializes the schema without adding synthetic prospects.
+
+## Development
 
 ## Getting Started
 

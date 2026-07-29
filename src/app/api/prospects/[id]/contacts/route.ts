@@ -8,9 +8,9 @@ export async function GET(
 ) {
   try {
     const { id } = await params;
-    const prospectId = parseInt(id, 10);
+    const prospectId = id;
 
-    const contacts = dbService.getContactsForProspect(prospectId);
+    const contacts = await dbService.getContactsForProspect(prospectId);
     return NextResponse.json({ success: true, contacts });
   } catch (error: any) {
     console.error('Error fetching contacts:', error);
@@ -27,9 +27,9 @@ export async function POST(
 ) {
   try {
     const { id } = await params;
-    const prospectId = parseInt(id, 10);
+    const prospectId = id;
 
-    const prospect: Prospect | undefined = dbService.getProspectById(prospectId);
+    const prospect: Prospect | undefined = await dbService.getProspectById(prospectId);
 
     if (!prospect) {
       return NextResponse.json(
@@ -39,7 +39,7 @@ export async function POST(
     }
 
     // Extract fields safely for geminiService
-    const companyOrName = prospect.company || prospect.name;
+    const companyOrName = prospect.company_name;
     const website = prospect.website || '';
 
     // Trigger Gemini search for contacts
@@ -49,7 +49,7 @@ export async function POST(
     const savedContacts = [];
     if (Array.isArray(decisionMakers)) {
       for (const dm of decisionMakers) {
-        const added = dbService.addContactForProspect(prospectId, {
+        const added = await dbService.addContactForProspect(prospectId, {
           name: dm.name,
           email: dm.email,
           role: dm.role,

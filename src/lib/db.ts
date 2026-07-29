@@ -1,15 +1,6 @@
-import Database from 'better-sqlite3';
-import path from 'path';
+import { createClient, type Client } from '@libsql/client';
 import crypto from 'crypto';
 
-// Connect to local SQLite database file
-const dbPath = path.join(process.cwd(), 'yorbis_sales.db');
-const db = new Database(dbPath);
-
-// Enable WAL mode for high concurrency in Next.js
-db.pragma('journal_mode = WAL');
-
-// --- TYPES & INTERFACES ---
 export interface Prospect {
   id: string;
   company_name: string;
@@ -19,7 +10,6 @@ export interface Prospect {
   contact_email?: string;
   location?: string;
   contract_intel?: string;
-  contract_intelligence?: string;
   icp_score?: number;
   icp_reasoning?: string;
   outreach_angle?: string;
@@ -28,23 +18,20 @@ export interface Prospect {
   notes?: string;
   research_brief?: string;
   research_status?: string;
-  research_summary?: string;
   industry?: string;
-  pain_points?: string;
   source_urls?: string;
   created_at?: string;
-  [key: string]: any;
 }
 
 export interface Contact {
   id: number;
   prospect_id: string;
   name: string;
-  email: string;
+  email?: string;
   role?: string;
   phone?: string;
-  created_at?: string;
-  [key: string]: any;
+  source_url?: string;
+  verification_status?: string;
 }
 
 export interface OutreachMessage {
@@ -56,258 +43,243 @@ export interface OutreachMessage {
   status?: string;
   sent_at?: string;
   created_at?: string;
-  [key: string]: any;
 }
 
-let isInitialized = false;
+let client: Client | undefined;
+let schemaPromise: Promise<void> | undefined;
 
-export function initDatabase() {
-  if (isInitialized) return;
-
-  // 1. Create base prospects table (TEXT id)
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS prospects (
-      id TEXT PRIMARY KEY,
-      company_name TEXT NOT NULL,
-      website TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
-  `);
-
-  // 2. Perform safe column migrations
-  const existingColumns = db
-    .prepare("PRAGMA table_info(prospects)")
-    .all() as { name: string }[];
-  const columnNames = existingColumns.map((col) => col.name);
-
-  const columnsToMigrate = [
-    { name: 'contact_name', type: 'TEXT' },
-    { name: 'contact_title', type: 'TEXT' },
-    { name: 'contact_email', type: 'TEXT' },
-    { name: 'location', type: 'TEXT' },
-    { name: 'contract_intel', type: 'TEXT' },
-    { name: 'contract_intelligence', type: 'TEXT' },
-    { name: 'icp_score', type: 'INTEGER DEFAULT 0' },
-    { name: 'icp_reasoning', type: 'TEXT' },
-    { name: 'outreach_angle', type: 'TEXT' },
-    { name: 'status', type: "TEXT DEFAULT 'NEW'" },
-    { name: 'stage', type: "TEXT DEFAULT 'NEW'" },
-    { name: 'notes', type: 'TEXT' },
-    { name: 'research_brief', type: 'TEXT' },
-    { name: 'research_status', type: "TEXT DEFAULT 'PENDING'" },
-    { name: 'research_summary', type: 'TEXT' },
-    { name: 'industry', type: 'TEXT' },
-    { name: 'pain_points', type: 'TEXT' },
-    { name: 'source_urls', type: 'TEXT' }
-  ];
-
-  for (const col of columnsToMigrate) {
-    if (!columnNames.includes(col.name)) {
-      try {
-        db.exec(`ALTER TABLE prospects ADD COLUMN ${col.name} ${col.type};`);
-      } catch (err: any) {
-        if (!err.message?.includes('duplicate column name')) {
-          throw err;
-        }
-      }
-    }
+export function getTursoClient() {
+  if (!client) {
+    const url = process.env.TURSO_DATABASE_URL || 'file:yorbis-local-dev.db';
+    const authToken = process.env.TURSO_AUTH_TOKEN;
+    client = createClient(authToken ? { url, authToken } : { url });
   }
-
-  // 3. Create contacts table
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS contacts (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      prospect_id TEXT NOT NULL,
-      name TEXT NOT NULL,
-      email TEXT NOT NULL,
-      role TEXT,
-      phone TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (prospect_id) REFERENCES prospects(id) ON DELETE CASCADE
-    );
-  `);
-
-  // 4. Create outreach table
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS outreach (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      prospect_id TEXT NOT NULL,
-      subject TEXT,
-      body TEXT NOT NULL,
-      channel TEXT DEFAULT 'email',
-      status TEXT DEFAULT 'DRAFT',
-      sent_at DATETIME,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (prospect_id) REFERENCES prospects(id) ON DELETE CASCADE
-    );
-  `);
-
-  // 5. Create settings table
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS settings (
-      key TEXT PRIMARY KEY,
-      value TEXT NOT NULL
-    );
-  `);
-
-  isInitialized = true;
+  return client;
 }
 
-// Initialize database immediately on module load
-initDatabase();
-
-// --- EXPLICIT QUERY HELPERS ---
-
-export function getProspectsByStage(stage: string): Prospect[] {
-  initDatabase();
-  // Support matching both 'stage' and 'status' columns
-  const stmt = db.prepare(`
-    SELECT * FROM prospects 
-    WHERE stage = ? OR status = ?
-    ORDER BY created_at DESC
-  `);
-  return stmt.all(stage, stage) as Prospect[];
+export function ensureSchema() {
+  if (!schemaPromise) {
+    const db = getTursoClient();
+    schemaPromise = db.executeMultiple(`
+      CREATE TABLE IF NOT EXISTS prospects (
+        id TEXT PRIMARY KEY,
+        company_name TEXT NOT NULL,
+        domain TEXT UNIQUE,
+        website TEXT,
+        contact_name TEXT,
+        contact_title TEXT,
+        contact_email TEXT,
+        location TEXT,
+        industry TEXT,
+        contract_intel TEXT,
+        icp_score INTEGER DEFAULT 0,
+        icp_reasoning TEXT,
+        outreach_angle TEXT,
+        source_urls TEXT,
+        research_brief TEXT,
+        research_status TEXT DEFAULT 'PENDING',
+        status TEXT DEFAULT 'NEW',
+        stage TEXT DEFAULT 'NEW',
+        notes TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE TABLE IF NOT EXISTS contacts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        prospect_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        email TEXT,
+        role TEXT,
+        phone TEXT,
+        source_url TEXT,
+        verification_status TEXT DEFAULT 'UNVERIFIED',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (prospect_id) REFERENCES prospects(id) ON DELETE CASCADE
+      );
+      CREATE TABLE IF NOT EXISTS outreach (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        prospect_id TEXT NOT NULL,
+        subject TEXT,
+        body TEXT NOT NULL,
+        channel TEXT DEFAULT 'email',
+        status TEXT DEFAULT 'DRAFT',
+        sent_at TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (prospect_id) REFERENCES prospects(id) ON DELETE CASCADE
+      );
+      CREATE TABLE IF NOT EXISTS saved_searches (
+        id TEXT PRIMARY KEY,
+        user_email TEXT NOT NULL,
+        query TEXT NOT NULL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE TABLE IF NOT EXISTS "user" (
+        id TEXT PRIMARY KEY,
+        name TEXT,
+        email TEXT UNIQUE,
+        emailVerified INTEGER,
+        image TEXT
+      );
+      CREATE TABLE IF NOT EXISTS "account" (
+        userId TEXT NOT NULL,
+        type TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        providerAccountId TEXT NOT NULL,
+        refresh_token TEXT,
+        access_token TEXT,
+        expires_at INTEGER,
+        token_type TEXT,
+        scope TEXT,
+        id_token TEXT,
+        session_state TEXT,
+        PRIMARY KEY (provider, providerAccountId),
+        FOREIGN KEY (userId) REFERENCES "user"(id) ON DELETE CASCADE
+      );
+      CREATE TABLE IF NOT EXISTS "session" (
+        sessionToken TEXT PRIMARY KEY,
+        userId TEXT NOT NULL,
+        expires INTEGER NOT NULL,
+        FOREIGN KEY (userId) REFERENCES "user"(id) ON DELETE CASCADE
+      );
+      CREATE TABLE IF NOT EXISTS "verificationToken" (
+        identifier TEXT NOT NULL,
+        token TEXT NOT NULL,
+        expires INTEGER NOT NULL,
+        PRIMARY KEY (identifier, token)
+      );
+      CREATE TABLE IF NOT EXISTS "authenticator" (
+        credentialID TEXT NOT NULL UNIQUE,
+        userId TEXT NOT NULL,
+        providerAccountId TEXT NOT NULL,
+        credentialPublicKey TEXT NOT NULL,
+        counter INTEGER NOT NULL,
+        credentialDeviceType TEXT NOT NULL,
+        credentialBackedUp INTEGER NOT NULL,
+        transports TEXT,
+        PRIMARY KEY (userId, credentialID),
+        FOREIGN KEY (userId) REFERENCES "user"(id) ON DELETE CASCADE
+      );
+    `).then(() => undefined).catch((error) => {
+      schemaPromise = undefined;
+      throw error;
+    });
+  }
+  return schemaPromise;
 }
 
-export function getAllProspects(): Prospect[] {
-  initDatabase();
-  const stmt = db.prepare(`
-    SELECT * FROM prospects 
-    ORDER BY created_at DESC
-  `);
-  return stmt.all() as Prospect[];
+function normalizeDomain(website?: string) {
+  if (!website) return null;
+  try {
+    return new URL(website.startsWith('http') ? website : `https://${website}`).hostname.replace(/^www\./, '').toLowerCase();
+  } catch {
+    return null;
+  }
 }
 
-export function updateProspectStage(id: string | number, stage: string) {
-  initDatabase();
-  // Keep both 'stage' and 'status' columns in sync
-  return db.prepare('UPDATE prospects SET stage = ?, status = ? WHERE id = ?').run(stage, stage, id);
+function row<T>(value: unknown) {
+  return value as T;
 }
 
-// --- DB SERVICE ABSTRACTION ---
 export const dbService = {
-  getAllProspects: (): Prospect[] => {
-    return getAllProspects();
+  async getAllProspects(): Promise<Prospect[]> {
+    await ensureSchema();
+    const result = await getTursoClient().execute('SELECT * FROM prospects ORDER BY created_at DESC');
+    return result.rows.map((item) => row<Prospect>(item));
   },
 
-  getProspectById: (id: string | number): Prospect | undefined => {
-    initDatabase();
-    return db.prepare('SELECT * FROM prospects WHERE id = ?').get(id) as Prospect | undefined;
+  async getProspectById(id: string): Promise<Prospect | undefined> {
+    await ensureSchema();
+    const result = await getTursoClient().execute({ sql: 'SELECT * FROM prospects WHERE id = ?', args: [id] });
+    return result.rows[0] ? row<Prospect>(result.rows[0]) : undefined;
   },
 
-  addProspect: (data: Partial<Prospect>): Prospect => {
-    initDatabase();
+  async addProspect(data: Partial<Prospect>): Promise<Prospect> {
+    await ensureSchema();
     const id = data.id || crypto.randomUUID();
-    
-    // Support mapping frontend fields to either db column
-    const companyName = data.company_name || data.company || 'Unknown Company';
-    const contactName = data.contact_name || data.name || null;
-    const contactEmail = data.contact_email || data.email || null;
-    const stage = data.stage || data.status || 'NEW';
-
-    const stmt = db.prepare(`
-      INSERT INTO prospects (
-        id, company_name, website, contact_name, contact_title,
-        contact_email, location, contract_intel, contract_intelligence,
-        icp_score, icp_reasoning, outreach_angle, status, stage, notes
-      ) VALUES (
-        ?, ?, ?, ?, ?,
-        ?, ?, ?, ?,
-        ?, ?, ?, ?, ?, ?
-      )
-    `);
-
-    stmt.run(
-      id,
-      companyName,
-      data.website || null,
-      contactName,
-      data.contact_title || null,
-      contactEmail,
-      data.location || null,
-      data.contract_intel || data.contract_intelligence || null,
-      data.contract_intelligence || data.contract_intel || null,
-      data.icp_score || 0,
-      data.icp_reasoning || null,
-      data.outreach_angle || null,
-      stage,
-      stage,
-      data.notes || null
-    );
-
-    return db.prepare('SELECT * FROM prospects WHERE id = ?').get(id) as Prospect;
-  },
-
-  updateProspect: (id: string | number, updates: Record<string, any>): Prospect | null => {
-    initDatabase();
-    
-    // Normalize updates to sync stage and status if either is updated
-    const normalizedUpdates = { ...updates };
-    if ('stage' in normalizedUpdates) {
-      normalizedUpdates.status = normalizedUpdates.stage;
-    } else if ('status' in normalizedUpdates) {
-      normalizedUpdates.stage = normalizedUpdates.status;
+    const domain = normalizeDomain(data.website);
+    const args = [
+      id, data.company_name || 'Unknown Company', domain, data.website || null,
+      data.contact_name || null, data.contact_title || null, data.contact_email || null,
+      data.location || null, data.industry || null, data.contract_intel || null,
+      data.icp_score || 0, data.icp_reasoning || null, data.outreach_angle || null,
+      data.source_urls || null, data.research_brief || null, data.stage || data.status || 'NEW',
+    ];
+    await getTursoClient().execute({
+      sql: `INSERT INTO prospects (
+        id, company_name, domain, website, contact_name, contact_title, contact_email,
+        location, industry, contract_intel, icp_score, icp_reasoning, outreach_angle,
+        source_urls, research_brief, status, stage
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(domain) DO UPDATE SET
+        company_name=excluded.company_name, website=excluded.website, location=excluded.location,
+        industry=excluded.industry, contract_intel=excluded.contract_intel,
+        icp_score=excluded.icp_score, icp_reasoning=excluded.icp_reasoning,
+        outreach_angle=excluded.outreach_angle, source_urls=excluded.source_urls,
+        updated_at=CURRENT_TIMESTAMP`,
+      args: [...args, data.stage || data.status || 'NEW'],
+    });
+    if (domain) {
+      const result = await getTursoClient().execute({ sql: 'SELECT * FROM prospects WHERE domain = ?', args: [domain] });
+      return row<Prospect>(result.rows[0]);
     }
-    
-    const keys = Object.keys(normalizedUpdates);
-    if (keys.length === 0) return null;
-
-    const setClause = keys.map((key) => `${key} = ?`).join(', ');
-    const values = Object.values(normalizedUpdates);
-
-    const stmt = db.prepare(`UPDATE prospects SET ${setClause} WHERE id = ?`);
-    stmt.run(...values, id);
-
-    return db.prepare('SELECT * FROM prospects WHERE id = ?').get(id) as Prospect;
+    return (await this.getProspectById(id)) as Prospect;
   },
 
-  deleteProspect: (id: string | number) => {
-    initDatabase();
-    return db.prepare('DELETE FROM prospects WHERE id = ?').run(id);
+  async updateProspect(id: string, updates: Partial<Prospect>): Promise<Prospect | null> {
+    await ensureSchema();
+    const allowed = ['stage', 'status', 'notes', 'contact_name', 'contact_title', 'contact_email', 'outreach_angle', 'research_brief', 'research_status'] as const;
+    const entries = allowed.filter((key) => updates[key] !== undefined).map((key) => [key, updates[key]] as const);
+    if (updates.stage !== undefined && updates.status === undefined) entries.push(['status', updates.stage]);
+    if (updates.status !== undefined && updates.stage === undefined) entries.push(['stage', updates.status]);
+    if (!entries.length) return null;
+    await getTursoClient().execute({
+      sql: `UPDATE prospects SET ${entries.map(([key]) => `${key} = ?`).join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+      args: [...entries.map(([, value]) => value ?? null), id],
+    });
+    return (await this.getProspectById(id)) || null;
   },
 
-  clearAllProspects: () => {
-    initDatabase();
-    return db.prepare('DELETE FROM prospects').run();
+  async deleteProspect(id: string) {
+    await ensureSchema();
+    return getTursoClient().execute({ sql: 'DELETE FROM prospects WHERE id = ?', args: [id] });
   },
 
-  // Contacts
-  getContactsForProspect: (prospectId: string | number): Contact[] => {
-    initDatabase();
-    return db.prepare('SELECT * FROM contacts WHERE prospect_id = ? ORDER BY id DESC').all(prospectId) as Contact[];
+  async clearAllProspects() {
+    await ensureSchema();
+    return getTursoClient().execute('DELETE FROM prospects');
   },
 
-  addContactForProspect: (prospectId: string | number, data: Partial<Contact>): Contact => {
-    initDatabase();
-    const stmt = db.prepare(`
-      INSERT INTO contacts (prospect_id, name, email, role, phone)
-      VALUES (?, ?, ?, ?, ?)
-    `);
-    const result = stmt.run(prospectId, data.name, data.email, data.role || null, data.phone || null);
-    return db.prepare('SELECT * FROM contacts WHERE id = ?').get(result.lastInsertRowid) as Contact;
+  async getContactsForProspect(prospectId: string): Promise<Contact[]> {
+    await ensureSchema();
+    const result = await getTursoClient().execute({ sql: 'SELECT * FROM contacts WHERE prospect_id = ? ORDER BY id DESC', args: [prospectId] });
+    return result.rows.map((item) => row<Contact>(item));
   },
 
-  // Outreach
-  getOutreachForProspect: (prospectId: string | number): OutreachMessage[] => {
-    initDatabase();
-    return db.prepare('SELECT * FROM outreach WHERE prospect_id = ? ORDER BY id DESC').all(prospectId) as OutreachMessage[];
+  async addContactForProspect(prospectId: string, data: Partial<Contact>): Promise<Contact> {
+    await ensureSchema();
+    const result = await getTursoClient().execute({
+      sql: 'INSERT INTO contacts (prospect_id, name, email, role, phone, source_url, verification_status) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      args: [prospectId, data.name || 'Unknown', data.email || null, data.role || null, data.phone || null, data.source_url || null, data.verification_status || 'UNVERIFIED'],
+    });
+    const saved = await getTursoClient().execute({ sql: 'SELECT * FROM contacts WHERE id = ?', args: [Number(result.lastInsertRowid)] });
+    return row<Contact>(saved.rows[0]);
   },
 
-  addOutreachMessage: (prospectId: string | number, data: Partial<OutreachMessage>): OutreachMessage => {
-    initDatabase();
-    const stmt = db.prepare(`
-      INSERT INTO outreach (prospect_id, subject, body, channel, status)
-      VALUES (?, ?, ?, ?, ?)
-    `);
-    const result = stmt.run(
-      prospectId,
-      data.subject || null,
-      data.body,
-      data.channel || 'email',
-      data.status || 'DRAFT'
-    );
-    return db.prepare('SELECT * FROM outreach WHERE id = ?').get(result.lastInsertRowid) as OutreachMessage;
-  }
+  async getOutreachForProspect(prospectId: string): Promise<OutreachMessage[]> {
+    await ensureSchema();
+    const result = await getTursoClient().execute({ sql: 'SELECT * FROM outreach WHERE prospect_id = ? ORDER BY id DESC', args: [prospectId] });
+    return result.rows.map((item) => row<OutreachMessage>(item));
+  },
+
+  async addOutreachMessage(prospectId: string, data: Partial<OutreachMessage>): Promise<OutreachMessage> {
+    await ensureSchema();
+    const result = await getTursoClient().execute({
+      sql: 'INSERT INTO outreach (prospect_id, subject, body, channel, status) VALUES (?, ?, ?, ?, ?)',
+      args: [prospectId, data.subject || null, data.body || '', data.channel || 'email', data.status || 'DRAFT'],
+    });
+    const saved = await getTursoClient().execute({ sql: 'SELECT * FROM outreach WHERE id = ?', args: [Number(result.lastInsertRowid)] });
+    return row<OutreachMessage>(saved.rows[0]);
+  },
 };
 
-export default db;
+export default getTursoClient;

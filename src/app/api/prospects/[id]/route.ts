@@ -10,11 +10,7 @@ export async function PATCH(
     const { id } = await params;
     const body = await req.json();
 
-    // Convert string ID to number if SQLite uses numeric IDs
-    const prospectId = Number(id);
-
-    // Call your dbService update method
-    const updated = dbService.updateProspect(prospectId, body);
+    const updated = await dbService.updateProspect(id, body);
 
     return NextResponse.json({ success: true, updated });
   } catch (error: any) {
@@ -33,11 +29,9 @@ export async function DELETE(
 ) {
   try {
     const { id } = await params;
-    const prospectId = Number(id);
+    await dbService.deleteProspect(id);
 
-    dbService.deleteProspect(prospectId);
-
-    return NextResponse.json({ success: true, deletedId: prospectId });
+    return NextResponse.json({ success: true, deletedId: id });
   } catch (error: any) {
     console.error(`Error deleting prospect ${params}:`, error);
     return NextResponse.json(

@@ -10,7 +10,10 @@ export async function GET(req: NextRequest) {
     const stage = searchParams.get('stage');
 
     // Fetch prospects using dbService or fallback
-    const prospects = await dbService.getAllProspects(stage && stage !== 'ALL' ? stage : undefined);
+    const allProspects = await dbService.getAllProspects();
+    const prospects = stage && stage !== 'ALL'
+      ? allProspects.filter((prospect) => prospect.stage === stage || prospect.status === stage)
+      : allProspects;
 
     return NextResponse.json({ success: true, prospects: prospects || [] });
   } catch (error) {
@@ -26,19 +29,20 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { name, email, company, notes, stage = 'NEW' } = body;
+    const { company_name, contact_name, contact_email, website, notes, stage = 'NEW' } = body;
 
-    if (!name || !email) {
+    if (!company_name) {
       return NextResponse.json(
-        { success: false, error: 'Name and email are required' },
+        { success: false, error: 'Company name is required' },
         { status: 400 }
       );
     }
 
     const prospect = await dbService.addProspect({
-      name,
-      email,
-      company: company || '',
+      company_name,
+      contact_name,
+      contact_email,
+      website,
       notes: notes || '',
       stage,
     });

@@ -1,15 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { updateProspectStage } from '@/lib/db';
+import { dbService } from '@/lib/db';
 
 export async function PATCH(req: NextRequest) {
   try {
     const { id, stage } = await req.json();
-    if (!id || !stage) {
-      return NextResponse.json({ success: false, error: 'Missing id or stage' }, { status: 400 });
-    }
-    updateProspectStage(id, stage);
+    if (!id || !stage) return NextResponse.json({ success: false, error: 'Missing id or stage' }, { status: 400 });
+    await dbService.updateProspect(String(id), { stage });
     return NextResponse.json({ success: true });
-  } catch (err: any) {
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (error) {
+    return NextResponse.json({ success: false, error: error instanceof Error ? error.message : 'Update failed' }, { status: 500 });
   }
 }

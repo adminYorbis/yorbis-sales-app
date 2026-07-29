@@ -8,9 +8,9 @@ export async function GET(
 ) {
   try {
     const { id } = await params;
-    const prospectId = parseInt(id, 10);
+    const prospectId = id;
 
-    const messages = dbService.getOutreachForProspect(prospectId);
+    const messages = await dbService.getOutreachForProspect(prospectId);
     return NextResponse.json({ success: true, messages });
   } catch (error: any) {
     console.error('Error fetching outreach messages:', error);
@@ -27,7 +27,7 @@ export async function POST(
 ) {
   try {
     const { id } = await params;
-    const prospectId = parseInt(id, 10);
+    const prospectId = id;
     const body = await request.json();
 
     if (!body.body) {
@@ -37,7 +37,7 @@ export async function POST(
       );
     }
 
-    const message = dbService.addOutreachMessage(prospectId, {
+    const message = await dbService.addOutreachMessage(prospectId, {
       body: body.body,
       subject: body.subject,
       channel: body.channel || 'email',
