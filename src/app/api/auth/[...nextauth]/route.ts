@@ -1,13 +1,13 @@
 import { handlers } from '@/auth';
-import { ensureSchema } from '@/lib/db';
+import { ensureAuthSchema } from '@/lib/auth-migration';
 import type { NextRequest } from 'next/server';
 
 export async function GET(request: NextRequest) {
-  await ensureSchema();
+  await ensureAuthSchema();
   return handlers.GET(request);
 }
 
 export async function POST(request: NextRequest) {
-  await ensureSchema();
+  await ensureAuthSchema();
   return handlers.POST(request);
 }

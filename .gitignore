@@ -12,3 +12,12 @@ node_modules/
 *.db-journal
 *.db-wal
 *.db-shm
+
+# Local tool caches and credential scratch files
+.npm-cache/
+.xdg-cache/
+.xdg-data/
+.xdg-config/
+.local-appdata/
+*Key.txt
+*Token.txt

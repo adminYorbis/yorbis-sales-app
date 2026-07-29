@@ -2,7 +2,7 @@ import NextAuth from 'next-auth';
 import Resend from 'next-auth/providers/resend';
 import { DrizzleAdapter } from '@auth/drizzle-adapter';
 import { authDb } from '@/lib/auth-db';
-import { ensureSchema } from '@/lib/db';
+import { ensureAuthSchema } from '@/lib/auth-migration';
 
 const allowedEmails = new Set(['sun@yorbisapp.com', 'anant@yorbisapp.com']);
 
@@ -26,7 +26,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
   },
   events: {
     async signIn() {
-      await ensureSchema();
+      await ensureAuthSchema();
     },
   },
 });
