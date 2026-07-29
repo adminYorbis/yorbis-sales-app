@@ -1,26 +1,29 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getAllProspects, getProspectsByStage } from '@/lib/db';
-import { dbService } from '@/lib/db';
+import { db, dbService } from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
 
-
-
-// GET /api/prospects?stage=NEW
+// GET /api/prospects (or /api/prospects?stage=NEW)
 export async function GET(req: NextRequest) {
   try {
-    const stage = req.nextUrl.searchParams.get('stage');
+    const { searchParams } = new URL(req.url);
+    const stage = searchParams.get('stage');
 
-    // Query SQLite directly via db.ts helpers
-    const prospects = (stage && stage !== 'ALL')
-      ? getProspectsByStage(stage)
-      : getAllProspects();
+    let result;
+    if (stage && stage !== 'ALL') {
+      result = await db.execute({
+        sql: 'SELECT * FROM prospects WHERE stage = ? ORDER BY created_at DESC',
+        args: [stage],
+      });
+    } else {
+      result = await db.execute('SELECT * FROM prospects ORDER BY created_at DESC');
+    }
 
-    return NextResponse.json({ success: true, prospects });
-  } catch (error: any) {
-    console.error('Error fetching prospects:', error);
+    return NextResponse.json({ success: true, prospects: result.rows || [] });
+  } catch (error) {
+    console.error('Database Error:', error);
     return NextResponse.json(
-      { success: false, error: error.message || 'Failed to fetch prospects' },
+      { success: false, prospects: [], error: 'Failed to fetch prospects' },
       { status: 500 }
     );
   }
@@ -39,8 +42,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Save prospect using dbService
-    const prospect = dbService.addProspect({
+    const prospect = await dbService.addProspect({
       name,
       email,
       company: company || '',
@@ -58,10 +60,41 @@ export async function POST(req: NextRequest) {
   }
 }
 
+// PATCH /api/prospects (Update prospect details)
+export async function PATCH(req: NextRequest) {
+  try {
+    const body = await req.json();
+    const { id, ...updates } = body;
+
+    if (!id) {
+      return NextResponse.json(
+        { success: false, error: 'Prospect ID is required' },
+        { status: 400 }
+      );
+    }
+
+    const updatedProspect = await dbService.updateProspect(id, updates);
+    if (!updatedProspect) {
+      return NextResponse.json(
+        { success: false, error: 'Prospect not found or no updates provided' },
+        { status: 404 }
+      );
+    }
+
+    return NextResponse.json({ success: true, prospect: updatedProspect });
+  } catch (error: any) {
+    console.error('Error updating prospect:', error);
+    return NextResponse.json(
+      { success: false, error: error.message || 'Failed to update prospect' },
+      { status: 500 }
+    );
+  }
+}
+
 // DELETE /api/prospects (Clears all prospects)
 export async function DELETE() {
   try {
-    dbService.clearAllProspects();
+    await dbService.clearAllProspects();
     return NextResponse.json({ success: true, message: 'All prospects cleared successfully' });
   } catch (error: any) {
     console.error('Error clearing prospects:', error);
