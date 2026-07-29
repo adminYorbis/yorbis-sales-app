@@ -1,8 +1,12 @@
 import Database from 'better-sqlite3';
 import path from 'path';
 
-// Existing DB initialization (retained as you have it)
-const db = new Database(path.join(process.cwd(), 'yorbis.db'));
+// Connect to local SQLite database file
+const dbPath = path.join(process.cwd(), 'sales.db');
+const db = new Database(dbPath);
+
+// Enable WAL mode for high concurrency in Next.js
+db.pragma('journal_mode = WAL');
 
 // Add these explicit query helpers for prospects:
 export function getProspectsByStage(stage: string) {
@@ -77,13 +81,7 @@ export interface OutreachMessage {
   [key: string]: any;
 }
 
-// Connect to local SQLite database file
-const dbPath = path.join(process.cwd(), 'sales.db');
-const db = new Database(dbPath);
-
-// Enable WAL mode for high concurrency in Next.js
-db.pragma('journal_mode = WAL');
-
+// Already initialized at the top
 let isInitialized = false;
 
 export function initDatabase() {
@@ -273,5 +271,10 @@ export const dbService = {
     return db.prepare('SELECT * FROM outreach WHERE id = ?').get(result.lastInsertRowid) as OutreachMessage;
   }
 };
+
+export function updateProspectStage(id: number | string, stage: string) {
+  initDatabase();
+  return db.prepare('UPDATE prospects SET stage = ? WHERE id = ?').run(stage, id);
+}
 
 export default db;

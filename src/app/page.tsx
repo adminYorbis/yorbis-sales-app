@@ -110,6 +110,28 @@ export default function Dashboard() {
     }
   };
 
+  const handleStageChange = async (id: number, newStage: string) => {
+    try {
+      const res = await fetch('/api/prospects/update-stage', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, stage: newStage }),
+      });
+      if (!res.ok) throw new Error('Failed to update stage');
+      
+      const data = await res.json();
+      if (data.success) {
+        setProspects((prev) =>
+          prev.map((p) => (p.id === id ? { ...p, stage: newStage } : p))
+        );
+      } else {
+        setError(data.error || 'Failed to update stage');
+      }
+    } catch (err: any) {
+      setError(err.message || 'Failed to update stage');
+    }
+  };
+
   const filteredProspects = prospects.filter((p) => {
     const matchesSearch =
       p.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -206,10 +228,17 @@ export default function Dashboard() {
                         <div className="text-xs text-slate-400">{p.email}</div>
                       </td>
                       <td className="py-3 px-4 text-slate-300">{p.company || 'N/A'}</td>
-                      <td className="py-3 px-4">
-                        <span className="inline-block px-2 py-1 text-xs font-semibold rounded bg-blue-900/60 text-blue-300 border border-blue-700/50">
-                          {p.stage || 'NEW'}
-                        </span>
+                      <td className="py-3 px-4" onClick={(e) => e.stopPropagation()}>
+                        <select
+                          value={p.stage || 'NEW'}
+                          onChange={(e) => handleStageChange(p.id, e.target.value)}
+                          className="bg-slate-900 border border-slate-700 text-slate-200 px-2 py-1 text-xs font-semibold rounded focus:outline-none focus:ring-1 focus:ring-blue-500 cursor-pointer"
+                        >
+                          <option value="NEW">New</option>
+                          <option value="CONTACTED">Contacted</option>
+                          <option value="QUALIFIED">Qualified</option>
+                          <option value="CLOSED">Closed</option>
+                        </select>
                       </td>
                       <td className="py-3 px-4 text-slate-400">
                         {p.research_status === 'COMPLETED' ? (
