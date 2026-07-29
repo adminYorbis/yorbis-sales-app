@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db, dbService } from '@/lib/db';
+import { dbService } from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
 
@@ -9,17 +9,10 @@ export async function GET(req: NextRequest) {
     const { searchParams } = new URL(req.url);
     const stage = searchParams.get('stage');
 
-    let result;
-    if (stage && stage !== 'ALL') {
-      result = await db.execute({
-        sql: 'SELECT * FROM prospects WHERE stage = ? ORDER BY created_at DESC',
-        args: [stage],
-      });
-    } else {
-      result = await db.execute('SELECT * FROM prospects ORDER BY created_at DESC');
-    }
+    // Fetch prospects using dbService or fallback
+    const prospects = await dbService.getAllProspects(stage && stage !== 'ALL' ? stage : undefined);
 
-    return NextResponse.json({ success: true, prospects: result.rows || [] });
+    return NextResponse.json({ success: true, prospects: prospects || [] });
   } catch (error) {
     console.error('Database Error:', error);
     return NextResponse.json(
@@ -29,7 +22,7 @@ export async function GET(req: NextRequest) {
   }
 }
 
-// POST /api/prospects (Add single prospect manually)
+// POST /api/prospects
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
@@ -60,7 +53,7 @@ export async function POST(req: NextRequest) {
   }
 }
 
-// PATCH /api/prospects (Update prospect details)
+// PATCH /api/prospects
 export async function PATCH(req: NextRequest) {
   try {
     const body = await req.json();
@@ -91,7 +84,7 @@ export async function PATCH(req: NextRequest) {
   }
 }
 
-// DELETE /api/prospects (Clears all prospects)
+// DELETE /api/prospects
 export async function DELETE() {
   try {
     await dbService.clearAllProspects();
