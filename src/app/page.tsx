@@ -2,11 +2,13 @@
 
 import { FormEvent, useEffect, useMemo, useState } from 'react';
 import styles from './page.module.css';
+import { determineDiscoveryMode, type DiscoveryMode } from '@/lib/discovery-contract';
 
 type Status = 'VERIFIED' | 'INFERRED' | 'UNKNOWN';
 type Signal = { label: string; description?: string; status: Status; category?: string; sourceIds?: string[] };
 type Evidence = { claim: string; source_name: string; source_url: string; summary: string; source_id?: string; published_date?: string };
 type Timing = { label: string; description: string; date?: string; sourceIds: string[] };
+type ConstraintEvaluation = { constraint: string; status: 'passed' | 'failed' | 'unknown'; explanation: string; sourceIds: string[] };
 type Prospect = {
   id: string; company_name: string; website?: string; location?: string; industry?: string;
   employee_count?: string; revenue_range?: string; company_description?: string; confidence?: string;
@@ -15,6 +17,7 @@ type Prospect = {
   unknown_signals_json?: string; evidence_json?: string; why_now_json?: string;
   contact_name?: string; contact_title?: string; contact_email?: string; contact_profile_url?: string;
   contact_source_url?: string; contact_reason?: string; search_run_id?: string;
+  constraint_evaluations_json?: string;
 };
 type Intent = {
   companyType?: string; industry?: string; geography?: string; employeeMin?: number; employeeMax?: number;
@@ -54,12 +57,12 @@ function intentRows(intent: Intent) {
 }
 
 export default function Discover() {
-  const [prospects, setProspects] = useState<Prospect[]>([]);
   const [results, setResults] = useState<Prospect[]>([]);
   const [recent, setRecent] = useState<SearchRun[]>([]);
   const [query, setQuery] = useState('');
   const [intent, setIntent] = useState<Intent | null>(null);
   const [requestType, setRequestType] = useState('NEW_DISCOVERY_REQUEST');
+  const [discoveryMode, setDiscoveryMode] = useState<DiscoveryMode>('new');
   const [runId, setRunId] = useState<string>();
   const [sessionId, setSessionId] = useState<string>();
   const [phase, setPhase] = useState<'idle' | 'interpreting' | 'review' | 'discovering'>('idle');
@@ -78,9 +81,9 @@ export default function Discover() {
   const [generating, setGenerating] = useState(false);
 
   async function loadWorkspace() {
-    const [p, s] = await Promise.all([fetch('/api/prospects', { cache: 'no-store' }), fetch('/api/searches', { cache: 'no-store' })]);
-    const pd = await p.json(); const sd = await s.json();
-    setProspects(pd.prospects || []); setRecent(sd.searches || []);
+    const response = await fetch('/api/searches', { cache: 'no-store' });
+    const data = await response.json();
+    setRecent(data.searches || []);
   }
   useEffect(() => {
     // This authenticated client workspace is hydrated from Turso-backed API routes.
@@ -96,11 +99,18 @@ export default function Discover() {
   async function interpret(event: FormEvent) {
     event.preventDefault();
     if (!query.trim() || phase === 'interpreting' || phase === 'discovering') return;
+    const nextMode = determineDiscoveryMode(query, Boolean(sessionId));
+    const previousIntent = nextMode === 'new' ? undefined : intent;
+    if (nextMode === 'new') {
+      setIntent(null); setRunId(undefined); setSessionId(undefined); setResults([]);
+      setSelected(null); setDraftOpen(false); setDraftSubject(''); setDraftBody('');
+    }
+    setDiscoveryMode(nextMode);
     setError(''); setErrorCode(''); setErrorRequestId(''); setMessage(''); setPhase('interpreting');
     try {
       const response = await fetch('/api/prospects/discover', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'interpret', query, previousIntent: sessionId ? intent : undefined }),
+        body: JSON.stringify({ action: 'interpret', mode: nextMode, query, previousIntent }),
       });
       const data = await response.json();
       if (!response.ok) {
@@ -108,7 +118,7 @@ export default function Discover() {
         setErrorRequestId(data.error?.requestId || '');
         throw new Error(data.error?.message || 'Yorbis could not interpret that request.');
       }
-      setIntent(data.intent); setRequestType(data.requestType); setPhase('review');
+      setIntent(data.intent); setRequestType(data.requestType); setDiscoveryMode(data.mode || nextMode); setPhase('review');
     } catch (reason) { setError(reason instanceof Error ? reason.message : 'Yorbis could not interpret that request.'); setPhase('idle'); }
   }
   async function discover() {
@@ -118,9 +128,10 @@ export default function Discover() {
       const response = await fetch('/api/prospects/discover', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          action: 'discover', query, intent, requestType, parentRunId: runId,
-          discoverySessionId: sessionId,
-          excludeDomains: requestType === 'EXPAND_CURRENT_RESULTS' ? prospects.map((item) => item.website).filter(Boolean) : [],
+          action: 'discover', mode: discoveryMode, query, intent, requestType,
+          parentRunId: discoveryMode === 'new' ? undefined : runId,
+          discoverySessionId: discoveryMode === 'new' ? undefined : sessionId,
+          excludeDomains: discoveryMode === 'expand' ? results.map((item) => item.website).filter(Boolean) : [],
         }),
       });
       const data = await response.json();
@@ -130,12 +141,7 @@ export default function Discover() {
         throw new Error(data.error?.message || 'Yorbis could not complete this discovery.');
       }
       const incoming: Prospect[] = data.prospects || [];
-      setResults(requestType === 'EXPAND_CURRENT_RESULTS' ? [...results, ...incoming] : incoming);
-      setProspects((existing) => {
-        const map = new Map(existing.map((item) => [item.id, item]));
-        incoming.forEach((item) => map.set(item.id, item));
-        return [...map.values()];
-      });
+      setResults(discoveryMode === 'expand' ? [...results, ...incoming] : incoming);
       setRunId(data.searchRunId); setSessionId(data.discoverySessionId); setMessage(data.message);
       setRecent((items) => [{ id: data.searchRunId, query, result_count: data.count, created_at: new Date().toISOString(), intent_json: JSON.stringify(intent), discovery_session_id: data.discoverySessionId }, ...items].slice(0, 8));
       setTab('recommended'); setPhase('idle');
@@ -149,6 +155,7 @@ export default function Discover() {
       if (!response.ok) throw new Error(data.error);
       setQuery(data.search.query); setIntent(parseIntent(data.search.intent_json)); setResults(data.prospects || []);
       setRunId(data.search.id); setSessionId(data.search.discovery_session_id || data.search.id);
+      setDiscoveryMode('restore');
       setMessage(`Restored ${data.prospects?.length || 0} companies from this discovery. No new research was run.`);
     } catch { setError('That discovery could not be restored. You can run it again from the request above.'); }
   }
@@ -195,10 +202,19 @@ export default function Discover() {
     finally { setGenerating(false); }
   }
 
-  const available = results.length ? results : prospects;
+  function startNewDiscovery() {
+    setQuery(''); setIntent(null); setRequestType('NEW_DISCOVERY_REQUEST'); setDiscoveryMode('new');
+    setRunId(undefined); setSessionId(undefined); setResults([]); setSelected(null);
+    setDraftOpen(false); setDraftSubject(''); setDraftBody(''); setMessage('');
+    setError(''); setErrorCode(''); setErrorRequestId(''); setPhase('idle'); setEditing(false);
+  }
+
+  const available = results;
   const shown = useMemo(() => available.filter((item) =>
     tab === 'recommended' ? (item.icp_score || 0) >= 80 && parseArray<Evidence>(item.evidence_json).length > 0
-      : tab === 'review' ? (item.icp_score || 0) < 60 : true
+      && parseArray<ConstraintEvaluation>(item.constraint_evaluations_json).every((evaluation) => evaluation.status === 'passed')
+      : tab === 'review' ? (item.icp_score || 0) < 60
+        || parseArray<ConstraintEvaluation>(item.constraint_evaluations_json).some((evaluation) => evaluation.status === 'unknown') : true
   ).sort((a, b) => (b.icp_score || 0) - (a.icp_score || 0)), [available, tab]);
   const strong = available.filter((item) => (item.icp_score || 0) >= 80).length;
   const moderate = available.filter((item) => (item.icp_score || 0) >= 60 && (item.icp_score || 0) < 80).length;
@@ -215,6 +231,7 @@ export default function Discover() {
         <p className={styles.kicker}>ASK YORBIS</p>
         <h1>What companies are you looking for today?</h1>
         <p className={styles.subtitle}>Describe the businesses you want to reach. Yorbis will discover, investigate and recommend the strongest opportunities.</p>
+        <div className={styles.newDiscoveryRow}><button onClick={startNewDiscovery}>New Discovery</button>{sessionId && <span>Active discovery · refinements will apply only when your instruction clearly says refine, exclude, prioritize, or find more.</span>}</div>
         <form className={styles.searchBox} onSubmit={interpret}>
           <textarea value={query} onChange={(event) => setQuery(event.target.value)} rows={3} placeholder="Find 25 California distributors with 20–200 employees importing from India or Southeast Asia." aria-label="Ask Yorbis" />
           <div><span>You can refine your latest discovery in plain language.</span><button disabled={!query.trim() || phase === 'interpreting' || phase === 'discovering'}>{phase === 'interpreting' ? 'UNDERSTANDING…' : 'DISCOVER COMPANIES'}</button></div>
@@ -258,6 +275,7 @@ export default function Discover() {
       {selected.website && <a className={styles.website} href={selected.website} target="_blank" rel="noreferrer">{host(selected.website)} ↗</a>}
       <section><h3>Executive Summary</h3><p>{selected.company_description} {selected.icp_reasoning || 'Public information remains limited.'}</p></section>
       <section><h3>Why Yorbis</h3><ul>{parseArray<Signal>(selected.signals_json).slice(0, 3).map((signal) => <li key={signal.label}>{signal.label}</li>)}</ul></section>
+      <section><h3>Request Fit</h3><div className={styles.findingGroup}>{parseArray<ConstraintEvaluation>(selected.constraint_evaluations_json).length ? parseArray<ConstraintEvaluation>(selected.constraint_evaluations_json).map((evaluation) => <article key={evaluation.constraint}><strong>{evaluation.status === 'passed' ? '✓' : evaluation.status === 'failed' ? '×' : '?'} {evaluation.constraint}</strong><p>{evaluation.explanation}</p></article>) : <p>No request-specific constraint evaluation is available for this historical result.</p>}</div></section>
       <section><h3>What We Found</h3>
         {(['VERIFIED', 'INFERRED'] as Status[]).map((status) => <div className={styles.findingGroup} key={status}><h4>{status === 'VERIFIED' ? 'Verified' : 'Inferred'}</h4>{parseArray<Signal>(selected.signals_json).filter((signal) => signal.status === status).map((signal) => <article key={signal.label}><strong>{signal.label}</strong><p>{signal.description}</p>{status === 'VERIFIED' && signal.sourceIds?.map((id) => {
           const source = parseArray<Evidence>(selected.evidence_json).find((item) => item.source_id === id); return source ? <a key={id} href={source.source_url} target="_blank" rel="noreferrer">Open Source · {source.source_name} ↗</a> : null;

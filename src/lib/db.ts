@@ -35,6 +35,7 @@ export interface Prospect {
   why_now_json?: string;
   recommended_conversation?: string;
   best_opportunity?: string;
+  constraint_evaluations_json?: string;
   search_run_id?: string;
   created_at?: string;
 }
@@ -228,6 +229,7 @@ export function ensureSchema() {
         ['contact_reason', 'TEXT'], ['recommended_approach', 'TEXT'], ['search_run_id', 'TEXT'],
         ['unknown_signals_json', 'TEXT'], ['why_now_json', 'TEXT'],
         ['recommended_conversation', 'TEXT'], ['best_opportunity', 'TEXT'],
+        ['constraint_evaluations_json', 'TEXT'],
       ] as const;
       for (const [name, type] of additions) {
         if (!names.has(name)) {
@@ -328,6 +330,7 @@ export const dbService = {
       data.contact_reason || null, data.recommended_approach || null, data.search_run_id || null,
       data.unknown_signals_json || null, data.why_now_json || null,
       data.recommended_conversation || null, data.best_opportunity || null,
+      data.constraint_evaluations_json || null,
       data.created_at || now, now,
     ];
     await getTursoClient().execute({
@@ -338,8 +341,8 @@ export const dbService = {
         company_description, confidence, signals_json, evidence_json, score_breakdown,
         contact_profile_url, contact_source_url, contact_reason, recommended_approach, search_run_id,
         unknown_signals_json, why_now_json, recommended_conversation, best_opportunity,
-        created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        constraint_evaluations_json, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(domain) DO UPDATE SET
         company_name=excluded.company_name, website=excluded.website, location=excluded.location,
         industry=excluded.industry, contract_intel=excluded.contract_intel,
@@ -353,6 +356,7 @@ export const dbService = {
         recommended_approach=excluded.recommended_approach, search_run_id=excluded.search_run_id,
         unknown_signals_json=excluded.unknown_signals_json, why_now_json=excluded.why_now_json,
         recommended_conversation=excluded.recommended_conversation, best_opportunity=excluded.best_opportunity,
+        constraint_evaluations_json=excluded.constraint_evaluations_json,
         updated_at=excluded.updated_at`,
       args,
     });

@@ -78,6 +78,7 @@ const additions = [
   ['why_now_json', 'TEXT'],
   ['recommended_conversation', 'TEXT'],
   ['best_opportunity', 'TEXT'],
+  ['constraint_evaluations_json', 'TEXT'],
 ];
 
 const addedColumns = [];

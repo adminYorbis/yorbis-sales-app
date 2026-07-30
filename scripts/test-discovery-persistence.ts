@@ -48,7 +48,7 @@ const count = await baseline.execute('SELECT COUNT(*) AS count FROM prospects');
 assert.equal(Number(count.rows[0].count), 2);
 const columns = await baseline.execute('PRAGMA table_info("prospects")');
 const names = new Set(columns.rows.map((column) => String(column.name)));
-for (const required of ['domain', 'industry', 'source_urls', 'research_brief', 'stage', 'notes', 'updated_at', 'signals_json']) {
+for (const required of ['domain', 'industry', 'source_urls', 'research_brief', 'stage', 'notes', 'updated_at', 'signals_json', 'constraint_evaluations_json']) {
   assert.equal(names.has(required), true, `${required} should be added`);
 }
 const indexes = await baseline.execute('PRAGMA index_list("prospects")');

@@ -3,8 +3,18 @@ import { NextResponse } from 'next/server';
 import { GoogleGenAI } from '@google/genai';
 import { auth } from '@/auth';
 import { dbService } from '@/lib/db';
-import { normalizeCandidate, normalizeIntent, type DiscoveryIntent, type RequestType } from '@/lib/discovery-contract';
+import {
+  applyDiscoveryIntentPatch,
+  createEmptyDiscoveryIntent,
+  normalizeCandidate,
+  normalizeIntent,
+  normalizePatch,
+  type DiscoveryIntent,
+  type DiscoveryMode,
+  type RequestType,
+} from '@/lib/discovery-contract';
 import { candidateRecords, DiscoveryError, extractJson, safeDiscoveryError } from '@/lib/discovery-response';
+import { evaluateRequiredConstraints } from '@/lib/discovery-constraints';
 import { calculateFitScore } from '@/lib/prospect-scoring';
 
 const apiKey = process.env.GEMINI_API_KEY;
@@ -13,7 +23,6 @@ const configuredModel = process.env.GEMINI_MODEL?.trim();
 const selectedModel = !configuredModel || configuredModel.startsWith('gemini-2.0')
   ? defaultModel
   : configuredModel;
-const requestTypes: RequestType[] = ['NEW_DISCOVERY_REQUEST', 'REFINE_CURRENT_RESULTS', 'EXPAND_CURRENT_RESULTS', 'EXCLUDE_RESULTS', 'CHANGE_PRIORITY'];
 
 export const maxDuration = 60;
 
@@ -43,17 +52,33 @@ function errorResponse(requestId: string, error: unknown) {
   }, { status: safe.status });
 }
 
-function interpretationPrompt(query: string, previousIntent?: DiscoveryIntent) {
-  return `Interpret a CEO's B2B company discovery request.
-Current structured request: ${JSON.stringify(previousIntent || {})}
-Latest user message: ${query}
-
-Classify the latest message as NEW_DISCOVERY_REQUEST, REFINE_CURRENT_RESULTS, EXPAND_CURRENT_RESULTS, EXCLUDE_RESULTS, or CHANGE_PRIORITY.
-For a refinement, preserve every prior constraint unless the user explicitly changes it.
-Never invent a missing constraint. Omit it or leave it empty.
+function interpretationPrompt(query: string, mode: DiscoveryMode, previousIntent?: DiscoveryIntent) {
+  if (mode === 'new') {
+    return `Parse this independent B2B company discovery request into a clean intent.
+Start from an empty intent. Do not use or infer any prior search.
+User request: ${query}
+Never invent a missing constraint. Arrays must be empty and missing scalar fields must be null.
 Return only JSON:
-{"requestType":"...","intent":{"companyType":"","industry":"","geography":"","employeeMin":null,"employeeMax":null,"revenueRange":"","internationalMarkets":[],"requiresImportExport":null,"supplierSignals":[],"paymentSignals":[],"excludedIndustries":[],"verifiedEvidenceRequired":null,"desiredCount":null,"otherConstraints":[]}}`;
+{"intent":{"companyType":null,"industry":null,"geography":null,"employeeMin":null,"employeeMax":null,"revenueRange":null,"internationalMarkets":[],"requiresImportExport":null,"supplierSignals":[],"paymentSignals":[],"excludedIndustries":[],"verifiedEvidenceRequired":null,"desiredCount":null,"otherConstraints":[],"priorityMarkets":[]}}`;
+  }
+  return `Create an explicit patch for an active B2B discovery.
+Mode: ${mode}
+Prior normalized intent: ${JSON.stringify(previousIntent || createEmptyDiscoveryIntent())}
+User instruction: ${query}
+Do not return a complete intent. Return only fields the user changes.
+Use clear to remove a constraint, add/remove for array changes, and set for scalar replacement.
+For reprioritize, set priorityMarkets without removing internationalMarkets.
+Return only JSON:
+{"patch":{"set":{},"clear":[],"add":{},"remove":{}}}`;
 }
+
+const modeToRequestType: Record<Exclude<DiscoveryMode, 'restore'>, RequestType> = {
+  new: 'NEW_DISCOVERY_REQUEST',
+  refine: 'REFINE_CURRENT_RESULTS',
+  expand: 'EXPAND_CURRENT_RESULTS',
+  exclude: 'EXCLUDE_RESULTS',
+  reprioritize: 'CHANGE_PRIORITY',
+};
 
 export async function POST(request: Request) {
   const requestId = crypto.randomUUID();
@@ -65,6 +90,7 @@ export async function POST(request: Request) {
 
     const body = await request.json() as {
       action?: 'interpret' | 'discover';
+      mode?: DiscoveryMode;
       query?: string;
       intent?: DiscoveryIntent;
       previousIntent?: DiscoveryIntent;
@@ -77,19 +103,32 @@ export async function POST(request: Request) {
     if (!query) return errorResponse(requestId, new DiscoveryError('DISCOVERY_REQUEST_INVALID', 'Describe the companies you want Yorbis to discover.', 400));
     log(requestId, 'request_received', {
       action: body.action || 'discover',
+      mode: body.mode || 'new',
       queryLength: query.length,
+      query: query.slice(0, 300),
       hasPreviousIntent: Boolean(body.previousIntent),
       requestedCount: body.intent?.desiredCount,
     });
 
     if (body.action === 'interpret') {
       try {
+        const mode: DiscoveryMode = ['new', 'refine', 'expand', 'exclude', 'reprioritize'].includes(String(body.mode))
+          ? body.mode as DiscoveryMode
+          : 'new';
         log(requestId, 'interpretation_started');
-        const result = await generate(interpretationPrompt(query, body.previousIntent));
+        const priorIntent = mode === 'new' ? undefined : normalizeIntent(body.previousIntent);
+        const result = await generate(interpretationPrompt(query, mode, priorIntent));
         const text = result.text || '';
-        const parsed = extractJson(text) as { intent?: unknown; requestType?: string };
-        const normalizedIntent = normalizeIntent(parsed.intent);
+        const parsed = extractJson(text) as { intent?: unknown; patch?: unknown };
+        const modelOutput = mode === 'new' ? normalizeIntent(parsed.intent) : normalizePatch(parsed.patch);
+        const normalizedIntent = mode === 'new'
+          ? { ...createEmptyDiscoveryIntent(), ...normalizeIntent(parsed.intent) }
+          : applyDiscoveryIntentPatch(priorIntent || createEmptyDiscoveryIntent(), normalizePatch(parsed.patch));
         log(requestId, 'interpretation_completed', {
+          mode,
+          priorIntent: priorIntent || null,
+          modelOutput,
+          finalIntent: normalizedIntent,
           responseLength: text.length,
           fields: Object.keys(normalizedIntent).filter((key) => normalizedIntent[key as keyof DiscoveryIntent] !== undefined),
         });
@@ -97,7 +136,8 @@ export async function POST(request: Request) {
           ok: true,
           requestId,
           intent: normalizedIntent,
-          requestType: requestTypes.includes(parsed.requestType as RequestType) ? parsed.requestType : 'NEW_DISCOVERY_REQUEST',
+          mode,
+          requestType: modeToRequestType[mode as Exclude<DiscoveryMode, 'restore'>],
         });
       } catch (error) {
         const safe = safeDiscoveryError(error);
@@ -105,11 +145,15 @@ export async function POST(request: Request) {
       }
     }
 
+    const mode: Exclude<DiscoveryMode, 'restore'> = ['new', 'refine', 'expand', 'exclude', 'reprioritize'].includes(String(body.mode))
+      ? body.mode as Exclude<DiscoveryMode, 'restore'>
+      : 'new';
     const intent = normalizeIntent(body.intent);
-    const requestType = requestTypes.includes(body.requestType as RequestType) ? body.requestType! : 'NEW_DISCOVERY_REQUEST';
+    const requestType = modeToRequestType[mode];
     const excludeDomains = Array.isArray(body.excludeDomains) ? body.excludeDomains.slice(0, 200) : [];
     log(requestId, 'interpretation_accepted', {
       requestType,
+      mode,
       desiredCount: intent.desiredCount,
       geography: intent.geography || 'not_specified',
       companyType: intent.companyType || 'not_specified',
@@ -125,6 +169,24 @@ export async function POST(request: Request) {
       });
       throw new DiscoveryError('DISCOVERY_PERSISTENCE_FAILED', 'The discovery database is not ready for new results.');
     }
+    const userHash = crypto.createHash('sha256').update(userEmail.toLowerCase()).digest('hex').slice(0, 12);
+    const cacheKey = crypto.createHash('sha256').update(JSON.stringify(intent)).digest('hex').slice(0, 16);
+    log(requestId, 'normalized_request_ready', {
+      userHash,
+      mode,
+      activeSessionId: mode === 'new' ? null : body.discoverySessionId || null,
+      finalIntent: intent,
+      cacheKey,
+    });
+    const planResult = await generate(`Create 4 to 8 targeted public web search queries for this normalized B2B discovery intent:
+${JSON.stringify(intent)}
+Use variations for company type, location, international markets, suppliers, contractors, and payment relevance.
+Return only JSON: {"queries":["query"]}`);
+    const plan = extractJson(planResult.text || '') as { queries?: unknown[] };
+    const searchQueries = Array.isArray(plan.queries)
+      ? plan.queries.filter((item): item is string => typeof item === 'string').slice(0, 8)
+      : [];
+    log(requestId, 'search_plan_completed', { searchQueries });
     const prompt = `You are Yorbis's evidence-first company discovery analyst.
 Yorbis helps SMBs collect customer payments and pay vendors, suppliers, and contractors globally.
 
@@ -136,6 +198,7 @@ ${query}
 
 REQUEST TYPE: ${requestType}
 DO NOT RETURN THESE EXISTING DOMAINS: ${JSON.stringify(excludeDomains)}
+TARGETED SEARCH QUERIES TO USE: ${JSON.stringify(searchQueries)}
 
 Use Google Search to identify real companies. Quality is more important than count.
 Do not invent companies, people, facts, employee counts, emails, dates, or URLs.
@@ -182,11 +245,20 @@ Return only valid JSON:
       throw error;
     }
     const rawCandidates = candidateRecords(parsed);
-    const candidates = rawCandidates.map(normalizeCandidate).filter((item) => item !== null);
+    const normalizedCandidates = rawCandidates.map(normalizeCandidate).filter((item) => item !== null);
+    const deduplicated = new Map<string, (typeof normalizedCandidates)[number]>();
+    let duplicateCount = 0;
+    for (const candidate of normalizedCandidates) {
+      const domain = new URL(candidate.website).hostname.replace(/^www\./, '').toLowerCase();
+      if (deduplicated.has(domain)) duplicateCount += 1;
+      else deduplicated.set(domain, candidate);
+    }
+    const candidates = [...deduplicated.values()];
     log(requestId, 'validation_completed', {
       received: rawCandidates.length,
       valid: candidates.length,
       rejected: rawCandidates.length - candidates.length,
+      duplicateCount,
     });
     if (!candidates.length && rawCandidates.length) {
       throw new DiscoveryError('DISCOVERY_RESPONSE_INVALID', 'The research response did not contain a usable company record.');
@@ -194,6 +266,7 @@ Return only valid JSON:
     const runId = crypto.randomUUID();
     const discoverySessionId = body.discoverySessionId || crypto.randomUUID();
     const saved = [];
+    const hardRejected: Array<{ company: string; reasons: string[] }> = [];
 
     for (const candidate of candidates) {
       const verified = candidate.signals?.filter((signal) => signal.status === 'VERIFIED') || [];
@@ -207,6 +280,21 @@ Return only valid JSON:
         source_id: source.id,
         published_date: source.publishedDate,
       }));
+      const constraintEvaluations = evaluateRequiredConstraints({
+        location: candidate.location,
+        industry: candidate.industry,
+        company_description: candidate.company_description,
+        employee_count: candidate.employee_count,
+        signals: candidate.signals,
+      }, intent);
+      const failedConstraints = constraintEvaluations.filter((evaluation) => evaluation.status === 'failed');
+      if (failedConstraints.length) {
+        hardRejected.push({
+          company: candidate.company_name,
+          reasons: failedConstraints.map((evaluation) => evaluation.constraint),
+        });
+        continue;
+      }
       let scoring;
       try {
         scoring = calculateFitScore({
@@ -243,6 +331,7 @@ Return only valid JSON:
         research_brief: candidate.best_opportunity,
         recommended_conversation: candidate.recommended_conversation,
         recommended_approach: candidate.recommended_conversation,
+        constraint_evaluations_json: JSON.stringify(constraintEvaluations),
         contact_name: candidate.contact_name || undefined,
         contact_title: candidate.contact_title || undefined,
         contact_email: candidate.contact_email || undefined,
@@ -261,7 +350,11 @@ Return only valid JSON:
       }
       saved.push(prospect);
     }
-    log(requestId, 'scoring_and_persistence_completed', { saved: saved.length });
+    log(requestId, 'scoring_and_persistence_completed', {
+      saved: saved.length,
+      hardRejectedCount: hardRejected.length,
+      hardRejected: hardRejected.slice(0, 20),
+    });
 
     try {
       await dbService.addSearchRun({
