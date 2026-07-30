@@ -65,6 +65,17 @@ const AUTH_MIGRATION_SQL = AUTH_MIGRATION_STATEMENTS.map((statement) => `${state
 const AUTH_TABLES = ['user', 'account', 'session', 'verificationToken', 'authenticator'] as const;
 let authMigrationPromise: Promise<void> | undefined;
 
+export class AuthMigrationError extends Error {
+  constructor(
+    public readonly step: number,
+    public readonly code: string,
+    options?: { cause?: unknown },
+  ) {
+    super(`Auth schema migration failed at additive statement ${step}.`, options);
+    this.name = 'AuthMigrationError';
+  }
+}
+
 export function productionDatabaseIdentity() {
   const rawUrl = process.env.TURSO_DATABASE_URL;
   if (!rawUrl) throw new Error('TURSO_DATABASE_URL is required.');
@@ -77,8 +88,15 @@ export async function ensureAuthSchema() {
   if (!authMigrationPromise) {
     authMigrationPromise = (async () => {
       const db = getTursoClient();
-      for (const statement of AUTH_MIGRATION_STATEMENTS) {
-        await db.execute(statement);
+      for (const [index, statement] of AUTH_MIGRATION_STATEMENTS.entries()) {
+        try {
+          await db.execute(statement);
+        } catch (error) {
+          const code = typeof error === 'object' && error && 'code' in error
+            ? String(error.code)
+            : 'UNKNOWN';
+          throw new AuthMigrationError(index + 1, code, { cause: error });
+        }
       }
       await verifyAuthSchema();
     })().catch((error) => {
