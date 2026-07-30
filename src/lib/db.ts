@@ -215,6 +215,13 @@ export function ensureSchema() {
       const existing = await db.execute('PRAGMA table_info("prospects")');
       const names = new Set(existing.rows.map((column) => String(column.name)));
       const additions = [
+        ['domain', 'TEXT'], ['website', 'TEXT'], ['contact_name', 'TEXT'],
+        ['contact_title', 'TEXT'], ['contact_email', 'TEXT'], ['location', 'TEXT'],
+        ['industry', 'TEXT'], ['contract_intel', 'TEXT'], ['icp_score', 'INTEGER DEFAULT 0'],
+        ['icp_reasoning', 'TEXT'], ['outreach_angle', 'TEXT'], ['source_urls', 'TEXT'],
+        ['research_brief', 'TEXT'], ['research_status', "TEXT DEFAULT 'PENDING'"],
+        ['status', "TEXT DEFAULT 'NEW'"], ['stage', "TEXT DEFAULT 'NEW'"],
+        ['notes', 'TEXT'], ['created_at', 'TEXT'], ['updated_at', 'TEXT'],
         ['employee_count', 'TEXT'], ['revenue_range', 'TEXT'], ['company_description', 'TEXT'],
         ['confidence', 'TEXT'], ['signals_json', 'TEXT'], ['evidence_json', 'TEXT'],
         ['score_breakdown', 'TEXT'], ['contact_profile_url', 'TEXT'], ['contact_source_url', 'TEXT'],
@@ -223,8 +230,15 @@ export function ensureSchema() {
         ['recommended_conversation', 'TEXT'], ['best_opportunity', 'TEXT'],
       ] as const;
       for (const [name, type] of additions) {
-        if (!names.has(name)) await db.execute(`ALTER TABLE prospects ADD COLUMN ${name} ${type}`);
+        if (!names.has(name)) {
+          try {
+            await db.execute(`ALTER TABLE prospects ADD COLUMN ${name} ${type}`);
+          } catch (error) {
+            if (!/duplicate column/i.test(error instanceof Error ? error.message : String(error))) throw error;
+          }
+        }
       }
+      await db.execute('CREATE UNIQUE INDEX IF NOT EXISTS prospects_domain_unique_idx ON prospects(domain)');
       const searchColumns = await db.execute('PRAGMA table_info("search_runs")');
       const searchNames = new Set(searchColumns.rows.map((column) => String(column.name)));
       const searchAdditions = [
@@ -232,7 +246,13 @@ export function ensureSchema() {
         ['request_type', "TEXT DEFAULT 'NEW_DISCOVERY_REQUEST'"], ['status', "TEXT DEFAULT 'COMPLETED'"],
       ] as const;
       for (const [name, type] of searchAdditions) {
-        if (!searchNames.has(name)) await db.execute(`ALTER TABLE search_runs ADD COLUMN ${name} ${type}`);
+        if (!searchNames.has(name)) {
+          try {
+            await db.execute(`ALTER TABLE search_runs ADD COLUMN ${name} ${type}`);
+          } catch (error) {
+            if (!/duplicate column/i.test(error instanceof Error ? error.message : String(error))) throw error;
+          }
+        }
       }
       await db.execute(`
         INSERT OR IGNORE INTO search_run_results (run_id, prospect_id, rank)
@@ -260,6 +280,24 @@ function row<T>(value: unknown) {
 }
 
 export const dbService = {
+  async ensureDiscoveryReady() {
+    await ensureSchema();
+    const result = await getTursoClient().execute('PRAGMA table_info("prospects")');
+    const columns = new Set(result.rows.map((column) => String(column.name)));
+    const required = [
+      'id', 'company_name', 'domain', 'website', 'industry', 'icp_score',
+      'signals_json', 'evidence_json', 'search_run_id', 'updated_at',
+    ];
+    const missing = required.filter((column) => !columns.has(column));
+    if (missing.length) throw new Error(`Prospect schema missing required columns: ${missing.join(', ')}`);
+    const indexes = await getTursoClient().execute('PRAGMA index_list("prospects")');
+    const hasUniqueDomain = indexes.rows.some((index) =>
+      String(index.name) === 'prospects_domain_unique_idx' && Number(index.unique) === 1
+    );
+    if (!hasUniqueDomain) throw new Error('Prospect schema missing unique domain index');
+    return true;
+  },
+
   async getAllProspects(): Promise<Prospect[]> {
     await ensureSchema();
     const result = await getTursoClient().execute('SELECT * FROM prospects ORDER BY created_at DESC');
@@ -276,6 +314,7 @@ export const dbService = {
     await ensureSchema();
     const id = data.id || crypto.randomUUID();
     const domain = normalizeDomain(data.website);
+    const now = new Date().toISOString();
     const args = [
       id, data.company_name || 'Unknown Company', domain, data.website || null,
       data.contact_name || null, data.contact_title || null, data.contact_email || null,
@@ -289,6 +328,7 @@ export const dbService = {
       data.contact_reason || null, data.recommended_approach || null, data.search_run_id || null,
       data.unknown_signals_json || null, data.why_now_json || null,
       data.recommended_conversation || null, data.best_opportunity || null,
+      data.created_at || now, now,
     ];
     await getTursoClient().execute({
       sql: `INSERT INTO prospects (
@@ -297,8 +337,9 @@ export const dbService = {
         source_urls, research_brief, status, stage, employee_count, revenue_range,
         company_description, confidence, signals_json, evidence_json, score_breakdown,
         contact_profile_url, contact_source_url, contact_reason, recommended_approach, search_run_id,
-        unknown_signals_json, why_now_json, recommended_conversation, best_opportunity
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        unknown_signals_json, why_now_json, recommended_conversation, best_opportunity,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(domain) DO UPDATE SET
         company_name=excluded.company_name, website=excluded.website, location=excluded.location,
         industry=excluded.industry, contract_intel=excluded.contract_intel,
@@ -312,7 +353,7 @@ export const dbService = {
         recommended_approach=excluded.recommended_approach, search_run_id=excluded.search_run_id,
         unknown_signals_json=excluded.unknown_signals_json, why_now_json=excluded.why_now_json,
         recommended_conversation=excluded.recommended_conversation, best_opportunity=excluded.best_opportunity,
-        updated_at=CURRENT_TIMESTAMP`,
+        updated_at=excluded.updated_at`,
       args,
     });
     if (domain) {

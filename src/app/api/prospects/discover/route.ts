@@ -115,6 +115,16 @@ export async function POST(request: Request) {
       companyType: intent.companyType || 'not_specified',
       excludedIndustryCount: intent.excludedIndustries?.length || 0,
     });
+    try {
+      await dbService.ensureDiscoveryReady();
+      log(requestId, 'persistence_preflight_succeeded');
+    } catch (error) {
+      log(requestId, 'persistence_preflight_failed', {
+        databaseCode: typeof error === 'object' && error && 'code' in error ? String(error.code) : 'unknown',
+        databaseMessage: error instanceof Error ? error.message.slice(0, 240) : 'Unknown database error',
+      });
+      throw new DiscoveryError('DISCOVERY_PERSISTENCE_FAILED', 'The discovery database is not ready for new results.');
+    }
     const prompt = `You are Yorbis's evidence-first company discovery analyst.
 Yorbis helps SMBs collect customer payments and pay vendors, suppliers, and contractors globally.
 
@@ -242,7 +252,11 @@ Return only valid JSON:
         search_run_id: runId,
         stage: 'NEW',
         });
-      } catch {
+      } catch (error) {
+        log(requestId, 'prospect_persistence_failed', {
+          databaseCode: typeof error === 'object' && error && 'code' in error ? String(error.code) : 'unknown',
+          databaseMessage: error instanceof Error ? error.message.slice(0, 240) : 'Unknown database error',
+        });
         throw new DiscoveryError('DISCOVERY_PERSISTENCE_FAILED', 'The discovery was generated but could not be saved.');
       }
       saved.push(prospect);
@@ -264,7 +278,11 @@ Return only valid JSON:
       for (const [index, prospect] of saved.entries()) {
         await dbService.linkProspectToSearchRun(runId, prospect.id, index + 1);
       }
-    } catch {
+    } catch (error) {
+      log(requestId, 'search_history_persistence_failed', {
+        databaseCode: typeof error === 'object' && error && 'code' in error ? String(error.code) : 'unknown',
+        databaseMessage: error instanceof Error ? error.message.slice(0, 240) : 'Unknown database error',
+      });
       throw new DiscoveryError('DISCOVERY_PERSISTENCE_FAILED', 'The discovery was generated but its search history could not be saved.');
     }
 

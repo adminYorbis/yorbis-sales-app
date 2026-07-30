@@ -8,6 +8,7 @@
     "start": "next start",
     "lint": "eslint",
     "test:discovery": "tsx scripts/test-discovery.ts",
+    "test:discovery-persistence": "tsx scripts/test-discovery-persistence.ts",
     "seed": "tsx scripts/seed.ts",
     "migrate:auth": "tsx scripts/migrate-auth.ts"
   },

@@ -43,6 +43,25 @@ await client.execute(`
 `);
 
 const additions = [
+  ['domain', 'TEXT'],
+  ['website', 'TEXT'],
+  ['contact_name', 'TEXT'],
+  ['contact_title', 'TEXT'],
+  ['contact_email', 'TEXT'],
+  ['location', 'TEXT'],
+  ['industry', 'TEXT'],
+  ['contract_intel', 'TEXT'],
+  ['icp_score', 'INTEGER DEFAULT 0'],
+  ['icp_reasoning', 'TEXT'],
+  ['outreach_angle', 'TEXT'],
+  ['source_urls', 'TEXT'],
+  ['research_brief', 'TEXT'],
+  ['research_status', "TEXT DEFAULT 'PENDING'"],
+  ['status', "TEXT DEFAULT 'NEW'"],
+  ['stage', "TEXT DEFAULT 'NEW'"],
+  ['notes', 'TEXT'],
+  ['created_at', 'TEXT'],
+  ['updated_at', 'TEXT'],
   ['employee_count', 'TEXT'],
   ['revenue_range', 'TEXT'],
   ['company_description', 'TEXT'],
@@ -68,6 +87,7 @@ for (const [name, type] of additions) {
     addedColumns.push(name);
   }
 }
+await client.execute('CREATE UNIQUE INDEX IF NOT EXISTS prospects_domain_unique_idx ON prospects(domain)');
 
 const searchColumnResult = await client.execute('PRAGMA table_info("search_runs")');
 const searchColumnNames = new Set(searchColumnResult.rows.map((column) => String(column.name)));
