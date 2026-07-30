@@ -69,6 +69,8 @@ export default function Discover() {
   const [tab, setTab] = useState<'recommended' | 'all' | 'review'>('recommended');
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
+  const [errorCode, setErrorCode] = useState('');
+  const [errorRequestId, setErrorRequestId] = useState('');
   const [channel, setChannel] = useState<Channel>('email');
   const [draftSubject, setDraftSubject] = useState('');
   const [draftBody, setDraftBody] = useState('');
@@ -94,20 +96,24 @@ export default function Discover() {
   async function interpret(event: FormEvent) {
     event.preventDefault();
     if (!query.trim() || phase === 'interpreting' || phase === 'discovering') return;
-    setError(''); setMessage(''); setPhase('interpreting');
+    setError(''); setErrorCode(''); setErrorRequestId(''); setMessage(''); setPhase('interpreting');
     try {
       const response = await fetch('/api/prospects/discover', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'interpret', query, previousIntent: sessionId ? intent : undefined }),
       });
       const data = await response.json();
-      if (!response.ok) throw new Error(data.error);
+      if (!response.ok) {
+        setErrorCode(data.error?.code || 'DISCOVERY_INTERPRETATION_FAILED');
+        setErrorRequestId(data.error?.requestId || '');
+        throw new Error(data.error?.message || 'Yorbis could not interpret that request.');
+      }
       setIntent(data.intent); setRequestType(data.requestType); setPhase('review');
     } catch (reason) { setError(reason instanceof Error ? reason.message : 'Yorbis could not interpret that request.'); setPhase('idle'); }
   }
   async function discover() {
     if (!intent || phase === 'discovering') return;
-    setPhase('discovering'); setProgress(0); setError('');
+    setPhase('discovering'); setProgress(0); setError(''); setErrorCode(''); setErrorRequestId('');
     try {
       const response = await fetch('/api/prospects/discover', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -118,7 +124,11 @@ export default function Discover() {
         }),
       });
       const data = await response.json();
-      if (!response.ok) throw new Error(data.error);
+      if (!response.ok) {
+        setErrorCode(data.error?.code || 'DISCOVERY_UNKNOWN_ERROR');
+        setErrorRequestId(data.error?.requestId || '');
+        throw new Error(data.error?.message || 'Yorbis could not complete this discovery.');
+      }
       const incoming: Prospect[] = data.prospects || [];
       setResults(requestType === 'EXPAND_CURRENT_RESULTS' ? [...results, ...incoming] : incoming);
       setProspects((existing) => {
@@ -218,7 +228,7 @@ export default function Discover() {
         </section>}
         {phase === 'discovering' && <div className={styles.progressPanel}><strong>Yorbis is investigating public business sources.</strong><ol>{progressSteps.map((step, index) => <li key={step} className={index <= progress ? styles.progressActive : ''}><span>{index < progress ? '✓' : index + 1}</span>{step}</li>)}</ol></div>}
         {message && <div className={styles.response}><strong>{message}</strong><p>I ranked them using international activity, company size, payment relevance, current timing and the strength of public evidence.</p></div>}
-        {error && <div className={styles.error}>{error}<button onClick={() => setPhase(intent ? 'review' : 'idle')}>Try again</button></div>}
+        {error && <div className={styles.errorPanel}><div><strong>{error}</strong>{process.env.NODE_ENV === 'development' && errorCode && <small>{errorCode} · {errorRequestId}</small>}</div><div><button onClick={() => void discover()} disabled={!intent}>Retry Discovery</button><button onClick={() => { setPhase(intent ? 'review' : 'idle'); setEditing(true); setError(''); }}>Edit Request</button><button onClick={() => setError('')}>View Previous Results</button></div></div>}
       </section>
 
       <section className={styles.workspace}>

@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@auth/drizzle-adapter": "^1.11.3",
+    "@google/genai": "^2.15.0",
     "@google/generative-ai": "^0.24.1",
     "@libsql/client": "^0.17.4",
     "drizzle-orm": "^0.45.2",

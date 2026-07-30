@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { normalizeCandidate, normalizeIntent } from '../src/lib/discovery-contract';
+import { candidateRecords, extractJson } from '../src/lib/discovery-response';
 import { calculateFitScore } from '../src/lib/prospect-scoring';
 
 const intent = normalizeIntent({
@@ -31,6 +32,12 @@ assert.equal(normalized?.signals?.[0].status, 'VERIFIED');
 assert.equal(normalized?.signals?.[1].status, 'UNKNOWN');
 assert.equal(normalized?.contact_email, null);
 assert.equal(normalizeCandidate({ company_name: 'Bad URL', website: 'javascript:alert(1)' }), null);
+
+assert.deepEqual(extractJson('```json\n{"companies":[]}\n```'), { companies: [] });
+assert.deepEqual(extractJson('Research complete.\n{"prospects":[{"company_name":"Legacy"}]}\nDone.'), {
+  prospects: [{ company_name: 'Legacy' }],
+});
+assert.equal(candidateRecords({ prospects: [{ company_name: 'Legacy' }] }).length, 1);
 
 const base = calculateFitScore({
   location: 'California',

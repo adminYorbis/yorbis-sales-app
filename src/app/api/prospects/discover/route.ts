@@ -1,23 +1,46 @@
 import crypto from 'crypto';
 import { NextResponse } from 'next/server';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { GoogleGenAI } from '@google/genai';
 import { auth } from '@/auth';
 import { dbService } from '@/lib/db';
 import { normalizeCandidate, normalizeIntent, type DiscoveryIntent, type RequestType } from '@/lib/discovery-contract';
+import { candidateRecords, DiscoveryError, extractJson, safeDiscoveryError } from '@/lib/discovery-response';
 import { calculateFitScore } from '@/lib/prospect-scoring';
 
 const apiKey = process.env.GEMINI_API_KEY;
+const defaultModel = 'gemini-3.1-flash-lite';
+const configuredModel = process.env.GEMINI_MODEL?.trim();
+const selectedModel = !configuredModel || configuredModel.startsWith('gemini-2.0')
+  ? defaultModel
+  : configuredModel;
 const requestTypes: RequestType[] = ['NEW_DISCOVERY_REQUEST', 'REFINE_CURRENT_RESULTS', 'EXPAND_CURRENT_RESULTS', 'EXCLUDE_RESULTS', 'CHANGE_PRIORITY'];
 
-function cleanJson(value: string) {
-  return value.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/i, '').trim();
+export const maxDuration = 60;
+
+function generate(contents: string, withSearch = false) {
+  return new GoogleGenAI({ apiKey }).models.generateContent({
+    model: selectedModel,
+    contents,
+    config: {
+      ...(withSearch ? { tools: [{ googleSearch: {} }] } : {}),
+      maxOutputTokens: 16384,
+      temperature: 0.2,
+    },
+  });
 }
 
-function model(withSearch = false) {
-  return new GoogleGenerativeAI(apiKey || '').getGenerativeModel({
-    model: process.env.GEMINI_MODEL || 'gemini-2.0-flash',
-    ...(withSearch ? { tools: [{ googleSearch: {} }] as never } : {}),
-  });
+function log(requestId: string, stage: string, details: Record<string, unknown> = {}) {
+  console.info(JSON.stringify({ scope: 'yorbis_discovery', requestId, stage, ...details }));
+}
+
+function errorResponse(requestId: string, error: unknown) {
+  const safe = safeDiscoveryError(error);
+  log(requestId, 'response_failed', { code: safe.code, status: safe.status });
+  return NextResponse.json({
+    ok: false,
+    error: { code: safe.code, message: safe.message, requestId },
+    previousResultsAvailable: true,
+  }, { status: safe.status });
 }
 
 function interpretationPrompt(query: string, previousIntent?: DiscoveryIntent) {
@@ -33,11 +56,12 @@ Return only JSON:
 }
 
 export async function POST(request: Request) {
+  const requestId = crypto.randomUUID();
   try {
     const session = await auth();
     const userEmail = session?.user?.email;
-    if (!userEmail) return NextResponse.json({ error: 'Authentication required.' }, { status: 401 });
-    if (!apiKey) return NextResponse.json({ error: 'Company discovery is not configured.' }, { status: 503 });
+    if (!userEmail) return errorResponse(requestId, new DiscoveryError('DISCOVERY_REQUEST_INVALID', 'Authentication required.', 401));
+    if (!apiKey) return errorResponse(requestId, new DiscoveryError('GEMINI_REQUEST_FAILED', 'Company discovery is not configured.', 503));
 
     const body = await request.json() as {
       action?: 'interpret' | 'discover';
@@ -50,20 +74,47 @@ export async function POST(request: Request) {
       excludeDomains?: string[];
     };
     const query = body.query?.trim();
-    if (!query) return NextResponse.json({ error: 'Describe the companies you want Yorbis to discover.' }, { status: 400 });
+    if (!query) return errorResponse(requestId, new DiscoveryError('DISCOVERY_REQUEST_INVALID', 'Describe the companies you want Yorbis to discover.', 400));
+    log(requestId, 'request_received', {
+      action: body.action || 'discover',
+      queryLength: query.length,
+      hasPreviousIntent: Boolean(body.previousIntent),
+      requestedCount: body.intent?.desiredCount,
+    });
 
     if (body.action === 'interpret') {
-      const result = await model().generateContent(interpretationPrompt(query, body.previousIntent));
-      const parsed = JSON.parse(cleanJson(result.response.text())) as { intent?: unknown; requestType?: string };
-      return NextResponse.json({
-        intent: normalizeIntent(parsed.intent),
-        requestType: requestTypes.includes(parsed.requestType as RequestType) ? parsed.requestType : 'NEW_DISCOVERY_REQUEST',
-      });
+      try {
+        log(requestId, 'interpretation_started');
+        const result = await generate(interpretationPrompt(query, body.previousIntent));
+        const text = result.text || '';
+        const parsed = extractJson(text) as { intent?: unknown; requestType?: string };
+        const normalizedIntent = normalizeIntent(parsed.intent);
+        log(requestId, 'interpretation_completed', {
+          responseLength: text.length,
+          fields: Object.keys(normalizedIntent).filter((key) => normalizedIntent[key as keyof DiscoveryIntent] !== undefined),
+        });
+        return NextResponse.json({
+          ok: true,
+          requestId,
+          intent: normalizedIntent,
+          requestType: requestTypes.includes(parsed.requestType as RequestType) ? parsed.requestType : 'NEW_DISCOVERY_REQUEST',
+        });
+      } catch (error) {
+        const safe = safeDiscoveryError(error);
+        return errorResponse(requestId, new DiscoveryError('DISCOVERY_INTERPRETATION_FAILED', safe.message, safe.status));
+      }
     }
 
     const intent = normalizeIntent(body.intent);
     const requestType = requestTypes.includes(body.requestType as RequestType) ? body.requestType! : 'NEW_DISCOVERY_REQUEST';
     const excludeDomains = Array.isArray(body.excludeDomains) ? body.excludeDomains.slice(0, 200) : [];
+    log(requestId, 'interpretation_accepted', {
+      requestType,
+      desiredCount: intent.desiredCount,
+      geography: intent.geography || 'not_specified',
+      companyType: intent.companyType || 'not_specified',
+      excludedIndustryCount: intent.excludedIndustries?.length || 0,
+    });
     const prompt = `You are Yorbis's evidence-first company discovery analyst.
 Yorbis helps SMBs collect customer payments and pay vendors, suppliers, and contractors globally.
 
@@ -101,11 +152,35 @@ Return only valid JSON:
 "contact_reason":"why this role is appropriate for the company size and use case"
 }]}`;
 
-    const result = await model(true).generateContent(prompt);
-    const parsed = JSON.parse(cleanJson(result.response.text())) as { companies?: unknown[] };
-    const candidates = (Array.isArray(parsed.companies) ? parsed.companies : [])
-      .map(normalizeCandidate)
-      .filter((item) => item !== null);
+    log(requestId, 'gemini_request_started', { model: selectedModel });
+    const result = await generate(prompt, true);
+    const text = result.text || '';
+    const groundingMetadata = result.candidates?.[0]?.groundingMetadata;
+    log(requestId, 'gemini_request_completed', {
+      responseType: typeof text,
+      responseLength: text.length,
+      groundingSourceCount: groundingMetadata?.groundingChunks?.length || 0,
+      groundingQueryCount: groundingMetadata?.webSearchQueries?.length || 0,
+      ...(process.env.NODE_ENV === 'development' ? { preview: text.slice(0, 160) } : {}),
+    });
+    let parsed: unknown;
+    try {
+      parsed = extractJson(text);
+      log(requestId, 'json_extraction_succeeded');
+    } catch (error) {
+      log(requestId, 'json_extraction_failed', { code: safeDiscoveryError(error).code });
+      throw error;
+    }
+    const rawCandidates = candidateRecords(parsed);
+    const candidates = rawCandidates.map(normalizeCandidate).filter((item) => item !== null);
+    log(requestId, 'validation_completed', {
+      received: rawCandidates.length,
+      valid: candidates.length,
+      rejected: rawCandidates.length - candidates.length,
+    });
+    if (!candidates.length && rawCandidates.length) {
+      throw new DiscoveryError('DISCOVERY_RESPONSE_INVALID', 'The research response did not contain a usable company record.');
+    }
     const runId = crypto.randomUUID();
     const discoverySessionId = body.discoverySessionId || crypto.randomUUID();
     const saved = [];
@@ -122,14 +197,21 @@ Return only valid JSON:
         source_id: source.id,
         published_date: source.publishedDate,
       }));
-      const scoring = calculateFitScore({
-        location: candidate.location,
-        employee_count: candidate.employee_count,
-        signals: candidate.signals,
-        evidence,
-        whyNowCount: candidate.why_now?.length || 0,
-      }, intent);
-      const prospect = await dbService.addProspect({
+      let scoring;
+      try {
+        scoring = calculateFitScore({
+          location: candidate.location,
+          employee_count: candidate.employee_count,
+          signals: candidate.signals,
+          evidence,
+          whyNowCount: candidate.why_now?.length || 0,
+        }, intent);
+      } catch {
+        throw new DiscoveryError('DISCOVERY_SCORING_FAILED', 'Opportunity scoring could not be completed.');
+      }
+      let prospect;
+      try {
+        prospect = await dbService.addProspect({
         company_name: candidate.company_name,
         website: candidate.website,
         location: candidate.location,
@@ -159,11 +241,16 @@ Return only valid JSON:
         contact_reason: candidate.contact_reason || undefined,
         search_run_id: runId,
         stage: 'NEW',
-      });
+        });
+      } catch {
+        throw new DiscoveryError('DISCOVERY_PERSISTENCE_FAILED', 'The discovery was generated but could not be saved.');
+      }
       saved.push(prospect);
     }
+    log(requestId, 'scoring_and_persistence_completed', { saved: saved.length });
 
-    await dbService.addSearchRun({
+    try {
+      await dbService.addSearchRun({
       id: runId,
       user_email: userEmail,
       query,
@@ -173,12 +260,18 @@ Return only valid JSON:
       discovery_session_id: discoverySessionId,
       request_type: requestType,
       status: 'COMPLETED',
-    });
-    for (const [index, prospect] of saved.entries()) {
-      await dbService.linkProspectToSearchRun(runId, prospect.id, index + 1);
+      });
+      for (const [index, prospect] of saved.entries()) {
+        await dbService.linkProspectToSearchRun(runId, prospect.id, index + 1);
+      }
+    } catch {
+      throw new DiscoveryError('DISCOVERY_PERSISTENCE_FAILED', 'The discovery was generated but its search history could not be saved.');
     }
 
+    log(requestId, 'response_succeeded', { status: 200, count: saved.length });
     return NextResponse.json({
+      ok: true,
+      requestId,
       success: true,
       prospects: saved,
       count: saved.length,
@@ -189,11 +282,6 @@ Return only valid JSON:
       message: `I searched public business sources and found ${saved.length} ${saved.length === 1 ? 'company' : 'companies'} that appear to match your request.`,
     });
   } catch (error) {
-    console.error('Company discovery failed:', error);
-    return NextResponse.json({
-      error: error instanceof SyntaxError
-        ? 'Yorbis could not structure the research response. Please try again.'
-        : 'Yorbis could not complete this discovery. Your previous results are still available.',
-    }, { status: 500 });
+    return errorResponse(requestId, error);
   }
 }
