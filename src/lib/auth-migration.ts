@@ -69,6 +69,7 @@ export class AuthMigrationError extends Error {
   constructor(
     public readonly step: number,
     public readonly code: string,
+    public readonly detail: string,
     options?: { cause?: unknown },
   ) {
     super(`Auth schema migration failed at additive statement ${step}.`, options);
@@ -95,7 +96,10 @@ export async function ensureAuthSchema() {
           const code = typeof error === 'object' && error && 'code' in error
             ? String(error.code)
             : 'UNKNOWN';
-          throw new AuthMigrationError(index + 1, code, { cause: error });
+          const detail = error instanceof Error
+            ? error.message.replace(/(eyJ[A-Za-z0-9._-]+)/g, '[redacted]').slice(0, 240)
+            : 'Unknown Turso migration error';
+          throw new AuthMigrationError(index + 1, code, detail, { cause: error });
         }
       }
       await verifyAuthSchema();
