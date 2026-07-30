@@ -3,289 +3,225 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react';
 import styles from './page.module.css';
 
+type Status = 'VERIFIED' | 'INFERRED' | 'UNKNOWN';
+type Signal = { label: string; status: Status; category?: string };
+type Evidence = { claim: string; source_name: string; source_url: string; summary: string };
 type Prospect = {
-  id: string;
-  company_name: string;
-  website?: string;
-  contact_name?: string;
-  contact_title?: string;
-  contact_email?: string;
-  location?: string;
-  industry?: string;
-  icp_score?: number;
-  icp_reasoning?: string;
-  outreach_angle?: string;
-  contract_intel?: string;
-  research_brief?: string;
-  source_urls?: string;
-  stage?: string;
+  id: string; company_name: string; website?: string; location?: string; industry?: string;
+  employee_count?: string; revenue_range?: string; company_description?: string; confidence?: string;
+  icp_score?: number; icp_reasoning?: string; research_brief?: string; recommended_approach?: string;
+  signals_json?: string; evidence_json?: string; score_breakdown?: string; source_urls?: string;
+  contact_name?: string; contact_title?: string; contact_email?: string; contact_profile_url?: string;
+  contact_source_url?: string; contact_reason?: string; outreach_angle?: string; search_run_id?: string;
 };
+type Intent = {
+  companyType?: string; geography?: string; employeeMin?: number; employeeMax?: number;
+  internationalMarkets?: string[]; desiredCount?: number; otherConstraints?: string[];
+};
+type SearchRun = { id: string; query: string; result_count: number };
 
 const examples = [
-  'Find US distributors importing consumer goods from India',
-  'Find California property managers with 20–200 employees',
-  'Find SMBs paying international contractors every month',
+  'US importers paying suppliers in India',
+  'California distributors sourcing internationally',
+  'SMBs paying international contractors',
+  'Companies likely needing global vendor payouts',
 ];
+const progressSteps = ['Finding companies', 'Verifying fit', 'Ranking prospects', 'Identifying contacts'];
 
-function initials(name: string) {
-  return name.split(/\s+/).slice(0, 2).map((part) => part[0]).join('').toUpperCase();
+function parseArray<T>(value?: string): T[] {
+  if (!value) return [];
+  try { const parsed = JSON.parse(value); return Array.isArray(parsed) ? parsed : []; } catch { return []; }
 }
-
-function sourcesFor(prospect: Prospect) {
-  if (!prospect.source_urls) return [];
-  try {
-    const parsed = JSON.parse(prospect.source_urls);
-    return Array.isArray(parsed) ? parsed.filter(Boolean) : [];
-  } catch {
-    return prospect.source_urls.split(/[\n,]/).map((value) => value.trim()).filter(Boolean);
-  }
+function parseObject<T>(value?: string): T | null {
+  if (!value) return null;
+  try { return JSON.parse(value) as T; } catch { return null; }
 }
-
-function sourceHost(source: string) {
-  try {
-    return new URL(source).hostname.replace('www.', '');
-  } catch {
-    return source;
-  }
-}
+function initials(name: string) { return name.split(/\s+/).slice(0, 2).map((part) => part[0]).join('').toUpperCase(); }
+function classification(score = 0) { return score >= 80 ? 'STRONG MATCH' : score >= 60 ? 'MODERATE MATCH' : 'NEEDS REVIEW'; }
+function sourceHost(url: string) { try { return new URL(url).hostname.replace('www.', ''); } catch { return 'Source'; } }
 
 export default function ProspectSearch() {
   const [prospects, setProspects] = useState<Prospect[]>([]);
+  const [currentResults, setCurrentResults] = useState<Prospect[]>([]);
   const [selected, setSelected] = useState<Prospect | null>(null);
   const [query, setQuery] = useState('');
+  const [intent, setIntent] = useState<Intent | null>(null);
+  const [recent, setRecent] = useState<SearchRun[]>([]);
   const [searching, setSearching] = useState(false);
+  const [progress, setProgress] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [filter, setFilter] = useState<'all' | 'priority' | 'new'>('all');
-  const [recentSearches, setRecentSearches] = useState<string[]>([]);
+  const [tab, setTab] = useState<'best' | 'all' | 'review'>('best');
+  const [drawerOpen, setDrawerOpen] = useState(false);
   const [outreachOpen, setOutreachOpen] = useState(false);
+  const [subject, setSubject] = useState('');
+  const [body, setBody] = useState('');
+  const [regenerating, setRegenerating] = useState(false);
 
-  async function loadProspects(selectFirst = false) {
-    const response = await fetch('/api/prospects', { cache: 'no-store' });
-    const data = await response.json();
-    const next = (data.prospects || []) as Prospect[];
-    setProspects(next);
-    if (selectFirst && next.length) setSelected(next[0]);
+  async function loadInitial() {
+    const [prospectResponse, searchResponse] = await Promise.all([fetch('/api/prospects', { cache: 'no-store' }), fetch('/api/searches', { cache: 'no-store' })]);
+    const prospectData = await prospectResponse.json();
+    const searchData = await searchResponse.json();
+    setProspects(prospectData.prospects || []);
+    setRecent(searchData.searches || []);
   }
 
   useEffect(() => {
     let active = true;
-    void (async () => {
-      try {
-        const response = await fetch('/api/prospects', { cache: 'no-store' });
-        const data = await response.json();
-        if (!active) return;
-        const next = (data.prospects || []) as Prospect[];
-        setProspects(next);
-        if (next.length) setSelected(next[0]);
-        const saved = window.localStorage.getItem('yorbis-recent-searches');
-        if (saved) setRecentSearches(JSON.parse(saved));
-      } catch {
-        if (active) setError('Prospects could not be loaded.');
-      } finally {
-        if (active) setLoading(false);
-      }
-    })();
+    // The initial client fetch hydrates this authenticated, database-backed workspace.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void loadInitial().catch(() => active && setError('Your prospect workspace could not be loaded.')).finally(() => active && setLoading(false));
     return () => { active = false; };
   }, []);
 
-  async function search(event: FormEvent) {
+  useEffect(() => {
+    if (!searching) return;
+    const timer = window.setInterval(() => setProgress((value) => Math.min(value + 1, progressSteps.length - 1)), 1800);
+    return () => window.clearInterval(timer);
+  }, [searching]);
+
+  async function runSearch(event: FormEvent) {
     event.preventDefault();
-    const cleanQuery = query.trim();
-    if (!cleanQuery || searching) return;
-    setSearching(true);
-    setError('');
+    if (!query.trim() || searching) return;
+    setSearching(true); setProgress(0); setError(''); setIntent(null);
     try {
       const response = await fetch('/api/prospects/discover', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: cleanQuery }),
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query: query.trim() }),
       });
       const data = await response.json();
-      if (!response.ok) throw new Error(data.error || 'Search failed');
-      const recent = [cleanQuery, ...recentSearches.filter((item) => item !== cleanQuery)].slice(0, 4);
-      setRecentSearches(recent);
-      window.localStorage.setItem('yorbis-recent-searches', JSON.stringify(recent));
-      await loadProspects(true);
+      if (!response.ok) throw new Error(data.error || 'Search failed.');
+      setIntent(data.intent || {});
+      setCurrentResults(data.prospects || []);
+      setProspects((existing) => {
+        const byId = new Map(existing.map((item) => [item.id, item]));
+        for (const item of data.prospects || []) byId.set(item.id, item);
+        return [...byId.values()];
+      });
+      setRecent((items) => [{ id: data.searchRunId, query: query.trim(), result_count: data.count }, ...items].slice(0, 6));
+      setTab('best');
+      if (data.prospects?.[0]) { setSelected(data.prospects[0]); setDrawerOpen(true); }
     } catch (searchError) {
-      setError(searchError instanceof Error ? searchError.message : 'Search failed. Try again.');
-    } finally {
-      setSearching(false);
-    }
+      setError(searchError instanceof Error ? searchError.message : 'Search failed.');
+    } finally { setSearching(false); }
   }
 
-  const ranked = useMemo(() => {
-    return [...prospects]
-      .filter((prospect) => filter === 'priority' ? (prospect.icp_score || 0) >= 80 : filter === 'new' ? (prospect.stage || 'NEW') === 'NEW' : true)
-      .sort((a, b) => (b.icp_score || 0) - (a.icp_score || 0));
-  }, [prospects, filter]);
+  const baseResults = currentResults.length ? currentResults : prospects;
+  const results = useMemo(() => [...baseResults]
+    .filter((item) => tab === 'best' ? (item.icp_score || 0) >= 80 : tab === 'review' ? (item.icp_score || 0) < 60 : true)
+    .sort((a, b) => (b.icp_score || 0) - (a.icp_score || 0)), [baseResults, tab]);
+  const strong = baseResults.filter((item) => (item.icp_score || 0) >= 80).length;
+  const moderate = baseResults.filter((item) => (item.icp_score || 0) >= 60 && (item.icp_score || 0) < 80).length;
+  const review = baseResults.filter((item) => (item.icp_score || 0) < 60).length;
 
-  const selectedSources = selected ? sourcesFor(selected) : [];
+  function openProspect(prospect: Prospect) { setSelected(prospect); setDrawerOpen(true); }
+  function openOutreach(prospect: Prospect) {
+    setSelected(prospect);
+    const draft = parseObject<{ subject: string; body: string }>(prospect.outreach_angle);
+    setSubject(draft?.subject || 'A quick question about international payments');
+    setBody(draft?.body || `Hi ${prospect.contact_name?.split(' ')[0] || 'there'},\n\nI noticed ${prospect.company_name} has international operations that may make vendor payments complex.\n\nI'm with Yorbis. We help growing businesses collect payments and pay vendors globally from one platform.\n\nCurious how you're handling this today?\n\nBest,\nAnant`);
+    setOutreachOpen(true);
+  }
+  async function regenerate() {
+    if (!selected) return;
+    setRegenerating(true);
+    try {
+      const response = await fetch(`/api/prospects/${selected.id}/outreach/generate`, { method: 'POST' });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error);
+      setSubject(data.draft.subject); setBody(data.draft.body);
+    } catch { setError('The outreach draft could not be regenerated.'); }
+    finally { setRegenerating(false); }
+  }
 
-  return (
-    <div className={styles.shell}>
-      <header className={styles.header}>
-        <div className={styles.brand}>
-          <div className={styles.mark}>Y</div>
-          <div>
-            <strong>Yorbis</strong>
-            <span>Prospect intelligence</span>
-          </div>
-        </div>
-        <nav aria-label="Primary navigation">
-          <button className={styles.navActive}>Prospects</button>
-          <button>Outreach</button>
-          <button>Meetings</button>
-        </nav>
-        <button className={styles.avatar} aria-label="Open account menu">AK</button>
-      </header>
+  return <div className={styles.shell}>
+    <header className={styles.header}>
+      <div className={styles.brand}><span>Y</span><div><strong>YORBIS</strong><small>PROSPECTS</small></div></div>
+      <div className={styles.user}>AK</div>
+    </header>
 
-      <main>
-        <section className={styles.hero}>
-          <div className={styles.eyebrow}><span /> Prospect search</div>
-          <h1>Who should Yorbis talk to next?</h1>
-          <p>Describe your ideal customer. Yorbis will find, research, and rank companies using evidence from the web.</p>
-          <form className={styles.search} onSubmit={search}>
-            <span className={styles.searchIcon}>⌕</span>
-            <textarea
-              rows={2}
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="Find 25 US distributors that source products internationally and may pay suppliers in India…"
-              aria-label="Describe the prospects you want to find"
-            />
-            <div className={styles.searchFooter}>
-              <span>Use a market, location, company size, or payment signal</span>
-              <button type="submit" disabled={!query.trim() || searching}>
-                {searching ? <><i className={styles.spinner} /> Researching</> : <>Find prospects <b>→</b></>}
-              </button>
+    <main>
+      <section className={styles.hero}>
+        <p className={styles.kicker}>PROSPECT SEARCH</p>
+        <h1>Find your next customers.</h1>
+        <p className={styles.subtitle}>Describe the businesses you want to reach. Yorbis will research, verify and rank the best matches.</p>
+        <form className={styles.searchBox} onSubmit={runSearch}>
+          <textarea value={query} onChange={(event) => setQuery(event.target.value)} rows={3}
+            placeholder="Find 25 California distributors importing from India or Southeast Asia..."
+            aria-label="Natural-language prospect search" />
+          <div><span>Include industry, geography, size, or international activity</span><button disabled={!query.trim() || searching}>{searching ? 'SEARCHING…' : 'SEARCH PROSPECTS'}</button></div>
+        </form>
+        <div className={styles.examples}>{examples.map((example) => <button key={example} onClick={() => setQuery(example)}>{example}</button>)}</div>
+
+        {searching && <div className={styles.progressPanel}>
+          <div><small>SEARCHING FOR</small><strong>{query}</strong></div>
+          <ol>{progressSteps.map((step, index) => <li key={step} className={index <= progress ? styles.progressActive : ''}><span>{index < progress ? '✓' : index + 1}</span>{step}</li>)}</ol>
+        </div>}
+        {intent && !searching && <div className={styles.intent}>
+          <small>SEARCHING FOR</small>
+          {[intent.companyType, intent.geography, intent.employeeMin || intent.employeeMax ? `${intent.employeeMin || 0}–${intent.employeeMax || 'any'} employees` : '', ...(intent.internationalMarkets || []), intent.desiredCount ? `${intent.desiredCount} companies` : ''].filter(Boolean).map((item) => <span key={String(item)}>{item}</span>)}
+        </div>}
+        {error && <div className={styles.error}>{error}</div>}
+      </section>
+
+      <section className={styles.content}>
+        <aside className={styles.recent}>
+          <h2>RECENT SEARCHES</h2>
+          {recent.length ? recent.map((item) => <button key={item.id} onClick={() => setQuery(item.query)}><strong>{item.query}</strong><span>{item.result_count} results</span></button>) : <p>No searches yet.</p>}
+        </aside>
+        <section className={styles.results}>
+          <div className={styles.summary}>
+            <div><h2>{baseResults.length} prospects found</h2><p>{strong} strong matches · {moderate} moderate · {review} need review</p></div>
+            <div className={styles.tabs}>
+              <button className={tab === 'best' ? styles.activeTab : ''} onClick={() => setTab('best')}>BEST MATCHES</button>
+              <button className={tab === 'all' ? styles.activeTab : ''} onClick={() => setTab('all')}>ALL RESULTS</button>
+              <button className={tab === 'review' ? styles.activeTab : ''} onClick={() => setTab('review')}>NEEDS REVIEW</button>
             </div>
-          </form>
-          {error && <div className={styles.error}>{error}</div>}
-          <div className={styles.examples}>
-            <span>Try:</span>
-            {examples.map((example) => <button key={example} onClick={() => setQuery(example)}>{example}</button>)}
           </div>
+          {loading ? <div className={styles.skeletons}>{[1,2,3].map((item) => <i key={item} />)}</div> : results.length ? results.map((prospect) => {
+            const signals = parseArray<Signal>(prospect.signals_json).slice(0, 4);
+            const evidence = parseArray<Evidence>(prospect.evidence_json);
+            return <article className={styles.card} key={prospect.id}>
+              <div className={styles.cardTop}>
+                <div className={styles.logo}>{initials(prospect.company_name)}</div>
+                <div className={styles.title}><h3>{prospect.company_name}</h3><p>{prospect.location || 'Unknown'} · {prospect.industry || 'Unknown'} · {prospect.employee_count || 'Unknown size'}</p></div>
+                <div className={styles.score}><strong>{prospect.icp_score || 0}</strong><span>{classification(prospect.icp_score)}</span></div>
+              </div>
+              <div className={styles.match}><small>WHY IT MATCHES</small><p>{prospect.icp_reasoning || 'Evidence is still limited; review before outreach.'}</p></div>
+              <div className={styles.signalRow}>{signals.length ? signals.map((signal) => <span key={signal.label} data-status={signal.status}>{signal.label}</span>) : <span data-status="UNKNOWN">Signals unknown</span>}</div>
+              <div className={styles.cardBottom}>
+                <div><small>BEST YORBIS ANGLE</small><strong>{prospect.research_brief || 'Discovery conversation'}</strong></div>
+                <div><small>{evidence.length} VERIFIED SOURCES</small><strong>{prospect.contact_name ? `${prospect.contact_name} · ${prospect.contact_title || 'Decision maker'}` : 'Contact not found'}</strong></div>
+                <button onClick={() => openProspect(prospect)}>VIEW PROSPECT</button>
+                <button className={styles.primary} onClick={() => openOutreach(prospect)}>CREATE OUTREACH</button>
+              </div>
+            </article>;
+          }) : <div className={styles.empty}><h3>Start with a precise search.</h3><p>Your evidence-backed prospect list will appear here.</p></div>}
         </section>
+      </section>
+    </main>
 
-        <section className={styles.workspace}>
-          <aside className={styles.searchRail}>
-            <h2>Searches</h2>
-            <button className={styles.savedActive}><span>✦</span> Best prospects</button>
-            <button><span>◷</span> Recently added <em>{prospects.filter((p) => (p.stage || 'NEW') === 'NEW').length}</em></button>
-            <div className={styles.divider} />
-            <h3>Recent</h3>
-            {recentSearches.length ? recentSearches.map((item) => (
-              <button key={item} onClick={() => setQuery(item)} className={styles.recentItem}>{item}</button>
-            )) : <p className={styles.muted}>Your searches will appear here.</p>}
-          </aside>
+    {drawerOpen && selected && <div className={styles.drawerBackdrop} onMouseDown={() => setDrawerOpen(false)}>
+      <aside className={styles.drawer} onMouseDown={(event) => event.stopPropagation()}>
+        <button className={styles.close} onClick={() => setDrawerOpen(false)}>×</button>
+        <header><div className={styles.logoLarge}>{initials(selected.company_name)}</div><div><h2>{selected.company_name}</h2><p>{selected.location || 'Unknown'} · {selected.industry || 'Unknown'} · {selected.employee_count || 'Unknown size'}</p></div><div className={styles.drawerScore}>{selected.icp_score || 0}<small>{selected.confidence || 'LOW'} CONFIDENCE</small></div></header>
+        {selected.website && <a className={styles.website} href={selected.website.startsWith('http') ? selected.website : `https://${selected.website}`} target="_blank" rel="noreferrer">{sourceHost(selected.website)} ↗</a>}
+        <section><h3>WHY YORBIS</h3><p>{selected.icp_reasoning || 'There is not enough public evidence to make a strong recommendation.'}</p></section>
+        <section><h3>BUYING / PAYMENT SIGNALS</h3><div className={styles.drawerSignals}>{parseArray<Signal>(selected.signals_json).map((signal) => <div key={signal.label}><span data-status={signal.status}>{signal.status}</span><p>{signal.label}</p></div>)}</div></section>
+        <section><h3>EVIDENCE</h3><div className={styles.evidence}>{parseArray<Evidence>(selected.evidence_json).map((item) => <article key={`${item.claim}-${item.source_url}`}><strong>{item.claim}</strong><small>{item.source_name || sourceHost(item.source_url)}</small><p>{item.summary}</p><a href={item.source_url} target="_blank" rel="noreferrer">OPEN SOURCE ↗</a></article>)}</div></section>
+        <section><h3>WHO TO CONTACT</h3>{selected.contact_name ? <div className={styles.contact}><div><strong>{selected.contact_name}</strong><p>{selected.contact_title || 'Role verified'} · {selected.contact_email || 'EMAIL NOT FOUND'}</p>{selected.contact_reason && <small>WHY THIS PERSON · {selected.contact_reason}</small>}</div>{selected.contact_profile_url && <a href={selected.contact_profile_url} target="_blank" rel="noreferrer">PROFILE ↗</a>}</div> : <p className={styles.unknown}>No publicly verified decision maker was found. EMAIL NOT FOUND.</p>}</section>
+        <section><h3>RECOMMENDED APPROACH</h3><p>{selected.recommended_approach || 'Ask how the company manages customer collections and vendor payments today.'}</p></section>
+        <button className={styles.drawerAction} onClick={() => openOutreach(selected)}>GENERATE OUTREACH</button>
+      </aside>
+    </div>}
 
-          <section className={styles.results}>
-            <div className={styles.resultsHeader}>
-              <div>
-                <h2>Ranked prospects</h2>
-                <p>{ranked.length} companies · strongest fit first</p>
-              </div>
-              <div className={styles.filters}>
-                {(['all', 'priority', 'new'] as const).map((item) => (
-                  <button key={item} className={filter === item ? styles.filterActive : ''} onClick={() => setFilter(item)}>
-                    {item === 'all' ? 'All' : item === 'priority' ? 'Priority 80+' : 'New'}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {loading ? <div className={styles.empty}>Loading prospects…</div> : ranked.length === 0 ? (
-              <div className={styles.empty}>
-                <div>⌕</div>
-                <h3>No matching prospects yet</h3>
-                <p>Run a natural-language search above to build your first ranked list.</p>
-              </div>
-            ) : ranked.map((prospect, index) => (
-              <button
-                key={prospect.id}
-                className={`${styles.prospectCard} ${selected?.id === prospect.id ? styles.selectedCard : ''}`}
-                onClick={() => setSelected(prospect)}
-              >
-                <span className={styles.rank}>{index + 1}</span>
-                <span className={styles.companyLogo}>{initials(prospect.company_name)}</span>
-                <span className={styles.companySummary}>
-                  <strong>{prospect.company_name}</strong>
-                  <small>{[prospect.industry, prospect.location].filter(Boolean).join(' · ') || 'Company details being verified'}</small>
-                  <span>{prospect.icp_reasoning || prospect.contract_intel || 'Research summary not yet available.'}</span>
-                </span>
-                <span className={styles.scoreBlock}>
-                  <strong>{prospect.icp_score || 0}</strong>
-                  <small>FIT SCORE</small>
-                </span>
-                <span className={styles.chevron}>›</span>
-              </button>
-            ))}
-          </section>
-
-          <aside className={styles.detail}>
-            {!selected ? <div className={styles.detailEmpty}>Select a company to see its evidence and next action.</div> : (
-              <>
-                <div className={styles.detailTop}>
-                  <span className={styles.companyLogoLarge}>{initials(selected.company_name)}</span>
-                  <div>
-                    <h2>{selected.company_name}</h2>
-                    <p>{selected.location || 'Location not verified'}</p>
-                  </div>
-                  <span className={styles.fitPill}>{selected.icp_score || 0} fit</span>
-                </div>
-                {selected.website && <a className={styles.website} href={selected.website.startsWith('http') ? selected.website : `https://${selected.website}`} target="_blank" rel="noreferrer">{selected.website} ↗</a>}
-
-                <div className={styles.detailSection}>
-                  <div className={styles.sectionLabel}>Why this company fits</div>
-                  <p>{selected.icp_reasoning || 'No verified fit explanation is available yet.'}</p>
-                </div>
-
-                <div className={styles.detailSection}>
-                  <div className={styles.sectionLabel}>Evidence & signals</div>
-                  <ul className={styles.signals}>
-                    {(selected.contract_intel || selected.research_brief || 'Research evidence has not been captured yet.')
-                      .split(/\n|•|;/).map((signal) => signal.replace(/^[-–]\s*/, '').trim()).filter(Boolean).slice(0, 4)
-                      .map((signal) => <li key={signal}><span>✓</span>{signal}</li>)}
-                  </ul>
-                </div>
-
-                <div className={styles.detailSection}>
-                  <div className={styles.sectionLabel}>Best contact</div>
-                  {selected.contact_name ? (
-                    <div className={styles.contact}>
-                      <span>{initials(selected.contact_name)}</span>
-                      <div><strong>{selected.contact_name}</strong><small>{selected.contact_title || 'Decision maker'}{selected.contact_email ? ` · ${selected.contact_email}` : ' · Email not verified'}</small></div>
-                    </div>
-                  ) : <div className={styles.unknownContact}><span>?</span><div><strong>Decision maker not verified</strong><small>Yorbis will never invent contact details.</small></div></div>}
-                </div>
-
-                <div className={styles.detailSection}>
-                  <div className={styles.sectionLabel}>Sources</div>
-                  {selectedSources.length ? selectedSources.slice(0, 4).map((source, index) => (
-                    <a className={styles.source} key={source} href={source} target="_blank" rel="noreferrer"><span>{index + 1}</span>{sourceHost(source)}<b>↗</b></a>
-                  )) : <p className={styles.muted}>No source URLs were stored for this prospect.</p>}
-                </div>
-
-                <button className={styles.outreachButton} onClick={() => setOutreachOpen(true)}>Generate outreach <span>→</span></button>
-              </>
-            )}
-          </aside>
-        </section>
-      </main>
-
-      {outreachOpen && selected && (
-        <div className={styles.modalBackdrop} onMouseDown={() => setOutreachOpen(false)}>
-          <div className={styles.modal} onMouseDown={(event) => event.stopPropagation()}>
-            <button className={styles.close} onClick={() => setOutreachOpen(false)}>×</button>
-            <span className={styles.modalEyebrow}>Outreach draft</span>
-            <h2>Start a conversation with {selected.company_name}</h2>
-            <label>Subject<input readOnly value="A quick question about your payment workflow" /></label>
-            <label>Message<textarea readOnly rows={9} value={selected.outreach_angle || `Hi ${selected.contact_name?.split(' ')[0] || 'there'},\n\nI was looking at ${selected.company_name} and thought Yorbis may be relevant to how your team handles customer collections and vendor payments.\n\nWe help growing businesses get paid, pay vendors, and move money globally from one platform—with no monthly fee to get started.\n\nWould you be open to a quick 15-minute conversation?\n\nBest,\nAnant`} /></label>
-            <div className={styles.modalActions}><button className={styles.secondaryButton} onClick={() => navigator.clipboard.writeText(selected.outreach_angle || '')}>Copy draft</button><button className={styles.primaryButton}>Approve draft</button></div>
-          </div>
-        </div>
-      )}
-    </div>
-  );
+    {outreachOpen && selected && <div className={styles.modalBackdrop} onMouseDown={() => setOutreachOpen(false)}>
+      <section className={styles.modal} onMouseDown={(event) => event.stopPropagation()}>
+        <button className={styles.close} onClick={() => setOutreachOpen(false)}>×</button>
+        <small>OUTREACH DRAFT</small><h2>{selected.company_name}</h2>
+        <label>SUBJECT<input value={subject} onChange={(event) => setSubject(event.target.value)} /></label>
+        <label>MESSAGE<textarea rows={11} value={body} onChange={(event) => setBody(event.target.value)} /></label>
+        <div className={styles.modalActions}><button onClick={regenerate} disabled={regenerating}>{regenerating ? 'REGENERATING…' : 'REGENERATE'}</button><button onClick={() => navigator.clipboard.writeText(`Subject: ${subject}\n\n${body}`)}>COPY</button></div>
+      </section>
+    </div>}
+  </div>;
 }

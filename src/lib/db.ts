@@ -20,6 +20,27 @@ export interface Prospect {
   research_status?: string;
   industry?: string;
   source_urls?: string;
+  employee_count?: string;
+  revenue_range?: string;
+  company_description?: string;
+  confidence?: string;
+  signals_json?: string;
+  evidence_json?: string;
+  score_breakdown?: string;
+  contact_profile_url?: string;
+  contact_source_url?: string;
+  contact_reason?: string;
+  recommended_approach?: string;
+  search_run_id?: string;
+  created_at?: string;
+}
+
+export interface SearchRun {
+  id: string;
+  user_email: string;
+  query: string;
+  intent_json: string;
+  result_count: number;
   created_at?: string;
 }
 
@@ -113,6 +134,14 @@ export function ensureSchema() {
         query TEXT NOT NULL,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP
       );
+      CREATE TABLE IF NOT EXISTS search_runs (
+        id TEXT PRIMARY KEY,
+        user_email TEXT NOT NULL,
+        query TEXT NOT NULL,
+        intent_json TEXT NOT NULL,
+        result_count INTEGER DEFAULT 0,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+      );
       CREATE TABLE IF NOT EXISTS "user" (
         id TEXT PRIMARY KEY,
         name TEXT,
@@ -159,7 +188,19 @@ export function ensureSchema() {
         PRIMARY KEY (userId, credentialID),
         FOREIGN KEY (userId) REFERENCES "user"(id) ON DELETE CASCADE
       );
-    `).then(() => undefined).catch((error) => {
+    `).then(async () => {
+      const existing = await db.execute('PRAGMA table_info("prospects")');
+      const names = new Set(existing.rows.map((column) => String(column.name)));
+      const additions = [
+        ['employee_count', 'TEXT'], ['revenue_range', 'TEXT'], ['company_description', 'TEXT'],
+        ['confidence', 'TEXT'], ['signals_json', 'TEXT'], ['evidence_json', 'TEXT'],
+        ['score_breakdown', 'TEXT'], ['contact_profile_url', 'TEXT'], ['contact_source_url', 'TEXT'],
+        ['contact_reason', 'TEXT'], ['recommended_approach', 'TEXT'], ['search_run_id', 'TEXT'],
+      ] as const;
+      for (const [name, type] of additions) {
+        if (!names.has(name)) await db.execute(`ALTER TABLE prospects ADD COLUMN ${name} ${type}`);
+      }
+    }).catch((error) => {
       schemaPromise = undefined;
       throw error;
     });
@@ -202,21 +243,34 @@ export const dbService = {
       data.contact_name || null, data.contact_title || null, data.contact_email || null,
       data.location || null, data.industry || null, data.contract_intel || null,
       data.icp_score || 0, data.icp_reasoning || null, data.outreach_angle || null,
-      data.source_urls || null, data.research_brief || null, data.stage || data.status || 'NEW',
+      data.source_urls || null, data.research_brief || null,
+      data.stage || data.status || 'NEW', data.stage || data.status || 'NEW',
+      data.employee_count || null, data.revenue_range || null, data.company_description || null,
+      data.confidence || null, data.signals_json || null, data.evidence_json || null,
+      data.score_breakdown || null, data.contact_profile_url || null, data.contact_source_url || null,
+      data.contact_reason || null, data.recommended_approach || null, data.search_run_id || null,
     ];
     await getTursoClient().execute({
       sql: `INSERT INTO prospects (
         id, company_name, domain, website, contact_name, contact_title, contact_email,
         location, industry, contract_intel, icp_score, icp_reasoning, outreach_angle,
-        source_urls, research_brief, status, stage
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        source_urls, research_brief, status, stage, employee_count, revenue_range,
+        company_description, confidence, signals_json, evidence_json, score_breakdown,
+        contact_profile_url, contact_source_url, contact_reason, recommended_approach, search_run_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(domain) DO UPDATE SET
         company_name=excluded.company_name, website=excluded.website, location=excluded.location,
         industry=excluded.industry, contract_intel=excluded.contract_intel,
         icp_score=excluded.icp_score, icp_reasoning=excluded.icp_reasoning,
         outreach_angle=excluded.outreach_angle, source_urls=excluded.source_urls,
+        employee_count=excluded.employee_count, revenue_range=excluded.revenue_range,
+        company_description=excluded.company_description, confidence=excluded.confidence,
+        signals_json=excluded.signals_json, evidence_json=excluded.evidence_json,
+        score_breakdown=excluded.score_breakdown, contact_profile_url=excluded.contact_profile_url,
+        contact_source_url=excluded.contact_source_url, contact_reason=excluded.contact_reason,
+        recommended_approach=excluded.recommended_approach, search_run_id=excluded.search_run_id,
         updated_at=CURRENT_TIMESTAMP`,
-      args: [...args, data.stage || data.status || 'NEW'],
+      args,
     });
     if (domain) {
       const result = await getTursoClient().execute({ sql: 'SELECT * FROM prospects WHERE domain = ?', args: [domain] });
@@ -279,6 +333,25 @@ export const dbService = {
     });
     const saved = await getTursoClient().execute({ sql: 'SELECT * FROM outreach WHERE id = ?', args: [Number(result.lastInsertRowid)] });
     return row<OutreachMessage>(saved.rows[0]);
+  },
+
+  async addSearchRun(data: Omit<SearchRun, 'created_at'>): Promise<SearchRun> {
+    await ensureSchema();
+    await getTursoClient().execute({
+      sql: 'INSERT INTO search_runs (id, user_email, query, intent_json, result_count) VALUES (?, ?, ?, ?, ?)',
+      args: [data.id, data.user_email, data.query, data.intent_json, data.result_count],
+    });
+    const result = await getTursoClient().execute({ sql: 'SELECT * FROM search_runs WHERE id = ?', args: [data.id] });
+    return row<SearchRun>(result.rows[0]);
+  },
+
+  async getRecentSearches(userEmail: string): Promise<SearchRun[]> {
+    await ensureSchema();
+    const result = await getTursoClient().execute({
+      sql: 'SELECT * FROM search_runs WHERE user_email = ? ORDER BY created_at DESC LIMIT 6',
+      args: [userEmail],
+    });
+    return result.rows.map((item) => row<SearchRun>(item));
   },
 };
 
