@@ -12,7 +12,6 @@ async function migrateOrError() {
       error: 'auth_schema_migration_failed',
       step: error instanceof AuthMigrationError ? error.step : null,
       code: error instanceof AuthMigrationError ? error.code : 'UNKNOWN',
-      detail: error instanceof AuthMigrationError ? error.detail : 'Unknown migration failure',
     }, { status: 500 });
   }
 }
