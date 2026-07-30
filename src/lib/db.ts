@@ -142,6 +142,8 @@ export function ensureSchema() {
         result_count INTEGER DEFAULT 0,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP
       );
+      CREATE INDEX IF NOT EXISTS search_runs_user_created_idx
+        ON search_runs(user_email, created_at DESC);
       CREATE TABLE IF NOT EXISTS "user" (
         id TEXT PRIMARY KEY,
         name TEXT,
