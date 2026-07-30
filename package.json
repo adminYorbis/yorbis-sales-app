@@ -10,6 +10,10 @@
     "test:discovery": "tsx scripts/test-discovery.ts",
     "test:discovery-persistence": "tsx scripts/test-discovery-persistence.ts",
     "test:yie-pocket-2": "tsx scripts/test-yie-pocket-2.ts",
+    "test:yie-pocket-3": "tsx scripts/test-yie-pocket-3.ts",
+    "yie:migrate": "tsx scripts/yie-migrate.ts",
+    "yie:seed:pocket-3": "tsx scripts/yie-seed-pocket-3.ts",
+    "yie:knowledge:diagnostic": "tsx scripts/yie-knowledge-diagnostic.ts",
     "seed": "tsx scripts/seed.ts",
     "migrate:auth": "tsx scripts/migrate-auth.ts"
   },

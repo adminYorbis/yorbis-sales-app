@@ -51,6 +51,10 @@ export const RETRIEVAL_STATUSES = ['RETRIEVED', 'UNAVAILABLE', 'BLOCKED', 'FAILE
 export const RetrievalStatusSchema = z.enum(RETRIEVAL_STATUSES);
 export type RetrievalStatus = z.infer<typeof RetrievalStatusSchema>;
 
+export const KNOWLEDGE_LIFECYCLE_STATUSES = ['DRAFT', 'APPROVED', 'ACTIVE', 'RETIRED'] as const;
+export const KnowledgeLifecycleStatusSchema = z.enum(KNOWLEDGE_LIFECYCLE_STATUSES);
+export type KnowledgeLifecycleStatus = z.infer<typeof KnowledgeLifecycleStatusSchema>;
+
 export type LegacyDiscoveryMode =
   | 'new'
   | 'refine'
