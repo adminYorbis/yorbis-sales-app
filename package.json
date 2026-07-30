@@ -9,6 +9,7 @@
     "lint": "eslint",
     "test:discovery": "tsx scripts/test-discovery.ts",
     "test:discovery-persistence": "tsx scripts/test-discovery-persistence.ts",
+    "test:yie-pocket-2": "tsx scripts/test-yie-pocket-2.ts",
     "seed": "tsx scripts/seed.ts",
     "migrate:auth": "tsx scripts/migrate-auth.ts"
   },
@@ -22,7 +23,8 @@
     "next-auth": "^5.0.0-beta.32",
     "react": "19.2.4",
     "react-dom": "19.2.4",
-    "resend": "^6.18.1"
+    "resend": "^6.18.1",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "^20",
