@@ -7,6 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
+    "test:discovery": "tsx scripts/test-discovery.ts",
     "seed": "tsx scripts/seed.ts",
     "migrate:auth": "tsx scripts/migrate-auth.ts"
   },

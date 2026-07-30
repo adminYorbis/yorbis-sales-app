@@ -3,38 +3,33 @@ import { NextResponse } from 'next/server';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { auth } from '@/auth';
 import { dbService } from '@/lib/db';
-import { calculateFitScore, type SearchIntent } from '@/lib/prospect-scoring';
+import { normalizeCandidate, normalizeIntent, type DiscoveryIntent, type RequestType } from '@/lib/discovery-contract';
+import { calculateFitScore } from '@/lib/prospect-scoring';
 
 const apiKey = process.env.GEMINI_API_KEY;
-
-type Signal = { label: string; status: 'VERIFIED' | 'INFERRED' | 'UNKNOWN'; category?: string; evidence_index?: number };
-type Evidence = { claim: string; source_name: string; source_url: string; summary: string };
-type Candidate = {
-  company_name: string;
-  website: string;
-  location?: string;
-  industry?: string;
-  employee_count?: string;
-  revenue_range?: string;
-  company_description?: string;
-  confidence?: string;
-  why_yorbis?: string;
-  signals?: Signal[];
-  evidence?: Evidence[];
-  likely_use_case?: string;
-  recommended_approach?: string;
-  contact_name?: string | null;
-  contact_title?: string | null;
-  contact_email?: string | null;
-  contact_profile_url?: string | null;
-  contact_source_url?: string | null;
-  contact_reason?: string | null;
-  outreach_subject?: string;
-  outreach_body?: string;
-};
+const requestTypes: RequestType[] = ['NEW_DISCOVERY_REQUEST', 'REFINE_CURRENT_RESULTS', 'EXPAND_CURRENT_RESULTS', 'EXCLUDE_RESULTS', 'CHANGE_PRIORITY'];
 
 function cleanJson(value: string) {
   return value.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/i, '').trim();
+}
+
+function model(withSearch = false) {
+  return new GoogleGenerativeAI(apiKey || '').getGenerativeModel({
+    model: process.env.GEMINI_MODEL || 'gemini-2.0-flash',
+    ...(withSearch ? { tools: [{ googleSearch: {} }] as never } : {}),
+  });
+}
+
+function interpretationPrompt(query: string, previousIntent?: DiscoveryIntent) {
+  return `Interpret a CEO's B2B company discovery request.
+Current structured request: ${JSON.stringify(previousIntent || {})}
+Latest user message: ${query}
+
+Classify the latest message as NEW_DISCOVERY_REQUEST, REFINE_CURRENT_RESULTS, EXPAND_CURRENT_RESULTS, EXCLUDE_RESULTS, or CHANGE_PRIORITY.
+For a refinement, preserve every prior constraint unless the user explicitly changes it.
+Never invent a missing constraint. Omit it or leave it empty.
+Return only JSON:
+{"requestType":"...","intent":{"companyType":"","industry":"","geography":"","employeeMin":null,"employeeMax":null,"revenueRange":"","internationalMarkets":[],"requiresImportExport":null,"supplierSignals":[],"paymentSignals":[],"excludedIndustries":[],"verifiedEvidenceRequired":null,"desiredCount":null,"otherConstraints":[]}}`;
 }
 
 export async function POST(request: Request) {
@@ -42,111 +37,126 @@ export async function POST(request: Request) {
     const session = await auth();
     const userEmail = session?.user?.email;
     if (!userEmail) return NextResponse.json({ error: 'Authentication required.' }, { status: 401 });
+    if (!apiKey) return NextResponse.json({ error: 'Company discovery is not configured.' }, { status: 503 });
 
-    const { query } = await request.json();
-    if (!query?.trim()) return NextResponse.json({ error: 'Describe the prospects you want to find.' }, { status: 400 });
-    if (!apiKey) return NextResponse.json({ error: 'Prospect research is not configured.' }, { status: 503 });
+    const body = await request.json() as {
+      action?: 'interpret' | 'discover';
+      query?: string;
+      intent?: DiscoveryIntent;
+      previousIntent?: DiscoveryIntent;
+      parentRunId?: string;
+      discoverySessionId?: string;
+      requestType?: RequestType;
+      excludeDomains?: string[];
+    };
+    const query = body.query?.trim();
+    if (!query) return NextResponse.json({ error: 'Describe the companies you want Yorbis to discover.' }, { status: 400 });
 
-    const model = new GoogleGenerativeAI(apiKey).getGenerativeModel({
-      model: process.env.GEMINI_MODEL || 'gemini-2.0-flash',
-      tools: [{ googleSearch: {} }] as never,
-    });
+    if (body.action === 'interpret') {
+      const result = await model().generateContent(interpretationPrompt(query, body.previousIntent));
+      const parsed = JSON.parse(cleanJson(result.response.text())) as { intent?: unknown; requestType?: string };
+      return NextResponse.json({
+        intent: normalizeIntent(parsed.intent),
+        requestType: requestTypes.includes(parsed.requestType as RequestType) ? parsed.requestType : 'NEW_DISCOVERY_REQUEST',
+      });
+    }
 
-    const prompt = `You are Yorbis's evidence-first B2B prospect researcher.
+    const intent = normalizeIntent(body.intent);
+    const requestType = requestTypes.includes(body.requestType as RequestType) ? body.requestType! : 'NEW_DISCOVERY_REQUEST';
+    const excludeDomains = Array.isArray(body.excludeDomains) ? body.excludeDomains.slice(0, 200) : [];
+    const prompt = `You are Yorbis's evidence-first company discovery analyst.
 Yorbis helps SMBs collect customer payments and pay vendors, suppliers, and contractors globally.
 
-USER SEARCH:
+CONFIRMED REQUEST:
+${JSON.stringify(intent)}
+
+LATEST REQUEST:
 ${query}
 
-First interpret only the constraints explicitly present. Then use Google Search to identify real matching companies.
-Never invent facts, employee counts, revenue, contacts, emails, supplier relationships, or URLs.
-Use "Unknown" or null when unsupported.
-Every VERIFIED signal must reference an evidence item with a real supporting URL.
-INFERRED signals must be conservative and clearly labeled.
-Public email means an email visibly published by a reliable public source; never infer an email pattern.
+REQUEST TYPE: ${requestType}
+DO NOT RETURN THESE EXISTING DOMAINS: ${JSON.stringify(excludeDomains)}
+
+Use Google Search to identify real companies. Quality is more important than count.
+Do not invent companies, people, facts, employee counts, emails, dates, or URLs.
+Use Unknown when public evidence is insufficient.
+Every VERIFIED signal must cite one or more sourceIds from the sources array.
+INFERRED items must explain the inference and must never claim payment volume, provider, fees, internal pain, or purchase intent.
+Why Now items require a credible dated business event and a sourceId. Omit weak routine social posts.
+Only return an email when it is explicitly published by a reliable source; otherwise return null and not_found.
 
 Return only valid JSON:
-{
-  "intent": {
-    "companyType": "string or empty",
-    "geography": "string or empty",
-    "employeeMin": number or null,
-    "employeeMax": number or null,
-    "revenueRange": "string or empty",
-    "internationalMarkets": ["explicit markets"],
-    "requiresImportExport": boolean or null,
-    "supplierSignals": ["explicit requirements"],
-    "paymentSignals": ["explicit requirements"],
-    "desiredCount": number,
-    "otherConstraints": ["other explicit constraints"]
-  },
-  "prospects": [{
-    "company_name": "real company",
-    "website": "official URL",
-    "location": "supported location or Unknown",
-    "industry": "supported industry or Unknown",
-    "employee_count": "supported estimate/range or Unknown",
-    "revenue_range": "supported range or Unknown",
-    "company_description": "one factual sentence",
-    "confidence": "HIGH, MEDIUM, or LOW",
-    "why_yorbis": "maximum three careful sentences",
-    "signals": [{"label":"concise signal","status":"VERIFIED|INFERRED|UNKNOWN","category":"supplier|cross-border|import-export|payout|pay-in|size|geography","evidence_index":0}],
-    "evidence": [{"claim":"specific claim","source_name":"publisher/domain","source_url":"actual URL","summary":"short supporting excerpt paraphrase"}],
-    "likely_use_case": "short Yorbis angle",
-    "recommended_approach": "one question the CEO should ask",
-    "contact_name": "publicly verified person or null",
-    "contact_title": "verified title or null",
-    "contact_email": "verified public business email or null",
-    "contact_profile_url": "public professional profile or null",
-    "contact_source_url": "source verifying role/email or null",
-    "contact_reason": "why this role is appropriate",
-    "outreach_subject": "short subject",
-    "outreach_body": "short evidence-based draft signed Anant"
-  }]
-}
+{"companies":[{
+"company_name":"real company","website":"official https URL","location":"supported location or Unknown",
+"industry":"supported industry or Unknown","employee_count":"supported estimate/range or Unknown",
+"revenue_range":"supported range or Unknown","company_description":"one factual sentence",
+"confidence":"HIGH|MEDIUM|LOW","recommendation_summary":"maximum three careful sentences including uncertainty",
+"best_opportunity":"short Yorbis use case",
+"sources":[{"id":"s1","title":"source title","url":"actual grounded URL","publishedDate":"YYYY-MM-DD if known","evidenceSummary":"what this source supports"}],
+"signals":[{"label":"concise label","description":"specific factual or careful inferred explanation","status":"VERIFIED|INFERRED|UNKNOWN","category":"supplier|cross-border|import-export|vendor-payment|pay-in|payout|size|geography|multi-country","sourceIds":["s1"]}],
+"why_now":[{"label":"credible recent signal","description":"why it matters commercially","date":"YYYY-MM-DD if known","sourceIds":["s1"]}],
+"recommended_conversation":"one discovery-oriented first conversation based on verified characteristics",
+"contact_name":"verified person or null","contact_title":"verified title or null",
+"contact_email":"public verified business email or null","contact_email_status":"verified|not_found",
+"contact_profile_url":"public professional profile or null","contact_source_url":"source verifying role/email or null",
+"contact_reason":"why this role is appropriate for the company size and use case"
+}]}`;
 
-Return up to the requested count, with quality and evidence more important than quantity.`;
-
-    const result = await model.generateContent(prompt);
-    const output = JSON.parse(cleanJson(result.response.text())) as { intent?: SearchIntent; prospects?: Candidate[] };
-    const intent: SearchIntent = output.intent || {};
+    const result = await model(true).generateContent(prompt);
+    const parsed = JSON.parse(cleanJson(result.response.text())) as { companies?: unknown[] };
+    const candidates = (Array.isArray(parsed.companies) ? parsed.companies : [])
+      .map(normalizeCandidate)
+      .filter((item) => item !== null);
     const runId = crypto.randomUUID();
-    const candidates = Array.isArray(output.prospects) ? output.prospects : [];
+    const discoverySessionId = body.discoverySessionId || crypto.randomUUID();
     const saved = [];
 
     for (const candidate of candidates) {
-      if (!candidate.company_name || !candidate.website) continue;
-      const signals = Array.isArray(candidate.signals) ? candidate.signals : [];
-      const evidence = Array.isArray(candidate.evidence)
-        ? candidate.evidence.filter((item) => item?.claim && item?.source_url)
-        : [];
-      const scoring = calculateFitScore({ location: candidate.location, employee_count: candidate.employee_count, signals, evidence }, intent);
-      const sources = [...new Set(evidence.map((item) => item.source_url))];
+      const verified = candidate.signals?.filter((signal) => signal.status === 'VERIFIED') || [];
+      const inferred = candidate.signals?.filter((signal) => signal.status === 'INFERRED') || [];
+      const unknown = candidate.signals?.filter((signal) => signal.status === 'UNKNOWN') || [];
+      const evidence = (candidate.sources || []).map((source) => ({
+        claim: source.evidenceSummary,
+        source_name: source.domain,
+        source_url: source.url,
+        summary: source.evidenceSummary,
+        source_id: source.id,
+        published_date: source.publishedDate,
+      }));
+      const scoring = calculateFitScore({
+        location: candidate.location,
+        employee_count: candidate.employee_count,
+        signals: candidate.signals,
+        evidence,
+        whyNowCount: candidate.why_now?.length || 0,
+      }, intent);
       const prospect = await dbService.addProspect({
         company_name: candidate.company_name,
         website: candidate.website,
-        location: candidate.location || 'Unknown',
-        industry: candidate.industry || 'Unknown',
-        employee_count: candidate.employee_count || 'Unknown',
-        revenue_range: candidate.revenue_range || 'Unknown',
-        company_description: candidate.company_description || '',
-        confidence: candidate.confidence || 'LOW',
+        location: candidate.location,
+        industry: candidate.industry,
+        employee_count: candidate.employee_count,
+        revenue_range: candidate.revenue_range,
+        company_description: candidate.company_description,
+        confidence: candidate.confidence,
         icp_score: scoring.score,
-        icp_reasoning: candidate.why_yorbis || '',
-        contract_intel: signals.map((signal) => signal.label).join('; '),
-        signals_json: JSON.stringify(signals),
+        icp_reasoning: candidate.recommendation_summary,
+        contract_intel: [...verified, ...inferred].map((signal) => signal.label).join('; '),
+        signals_json: JSON.stringify([...verified, ...inferred]),
+        unknown_signals_json: JSON.stringify(unknown),
         evidence_json: JSON.stringify(evidence),
+        why_now_json: JSON.stringify(candidate.why_now || []),
         score_breakdown: JSON.stringify(scoring.breakdown),
-        source_urls: JSON.stringify(sources),
-        recommended_approach: candidate.recommended_approach || '',
-        outreach_angle: JSON.stringify({ subject: candidate.outreach_subject || 'A quick question', body: candidate.outreach_body || '' }),
+        source_urls: JSON.stringify(candidate.sources?.map((source) => source.url) || []),
+        best_opportunity: candidate.best_opportunity,
+        research_brief: candidate.best_opportunity,
+        recommended_conversation: candidate.recommended_conversation,
+        recommended_approach: candidate.recommended_conversation,
         contact_name: candidate.contact_name || undefined,
         contact_title: candidate.contact_title || undefined,
         contact_email: candidate.contact_email || undefined,
         contact_profile_url: candidate.contact_profile_url || undefined,
         contact_source_url: candidate.contact_source_url || undefined,
         contact_reason: candidate.contact_reason || undefined,
-        research_brief: candidate.likely_use_case || '',
         search_run_id: runId,
         stage: 'NEW',
       });
@@ -156,14 +166,34 @@ Return up to the requested count, with quality and evidence more important than 
     await dbService.addSearchRun({
       id: runId,
       user_email: userEmail,
-      query: query.trim(),
+      query,
       intent_json: JSON.stringify(intent),
       result_count: saved.length,
+      parent_run_id: body.parentRunId,
+      discovery_session_id: discoverySessionId,
+      request_type: requestType,
+      status: 'COMPLETED',
     });
+    for (const [index, prospect] of saved.entries()) {
+      await dbService.linkProspectToSearchRun(runId, prospect.id, index + 1);
+    }
 
-    return NextResponse.json({ success: true, prospects: saved, count: saved.length, intent, searchRunId: runId });
+    return NextResponse.json({
+      success: true,
+      prospects: saved,
+      count: saved.length,
+      intent,
+      requestType,
+      searchRunId: runId,
+      discoverySessionId,
+      message: `I searched public business sources and found ${saved.length} ${saved.length === 1 ? 'company' : 'companies'} that appear to match your request.`,
+    });
   } catch (error) {
-    console.error('Prospect discovery failed:', error);
-    return NextResponse.json({ error: error instanceof Error ? error.message : 'Prospect search failed.' }, { status: 500 });
+    console.error('Company discovery failed:', error);
+    return NextResponse.json({
+      error: error instanceof SyntaxError
+        ? 'Yorbis could not structure the research response. Please try again.'
+        : 'Yorbis could not complete this discovery. Your previous results are still available.',
+    }, { status: 500 });
   }
 }

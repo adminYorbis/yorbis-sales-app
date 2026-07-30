@@ -31,6 +31,10 @@ export interface Prospect {
   contact_source_url?: string;
   contact_reason?: string;
   recommended_approach?: string;
+  unknown_signals_json?: string;
+  why_now_json?: string;
+  recommended_conversation?: string;
+  best_opportunity?: string;
   search_run_id?: string;
   created_at?: string;
 }
@@ -41,6 +45,10 @@ export interface SearchRun {
   query: string;
   intent_json: string;
   result_count: number;
+  parent_run_id?: string;
+  discovery_session_id?: string;
+  request_type?: string;
+  status?: string;
   created_at?: string;
 }
 
@@ -140,10 +148,23 @@ export function ensureSchema() {
         query TEXT NOT NULL,
         intent_json TEXT NOT NULL,
         result_count INTEGER DEFAULT 0,
+        parent_run_id TEXT,
+        discovery_session_id TEXT,
+        request_type TEXT DEFAULT 'NEW_DISCOVERY_REQUEST',
+        status TEXT DEFAULT 'COMPLETED',
         created_at TEXT DEFAULT CURRENT_TIMESTAMP
       );
       CREATE INDEX IF NOT EXISTS search_runs_user_created_idx
         ON search_runs(user_email, created_at DESC);
+      CREATE TABLE IF NOT EXISTS search_run_results (
+        run_id TEXT NOT NULL,
+        prospect_id TEXT NOT NULL,
+        rank INTEGER DEFAULT 0,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (run_id, prospect_id),
+        FOREIGN KEY (run_id) REFERENCES search_runs(id) ON DELETE CASCADE,
+        FOREIGN KEY (prospect_id) REFERENCES prospects(id) ON DELETE CASCADE
+      );
       CREATE TABLE IF NOT EXISTS "user" (
         id TEXT PRIMARY KEY,
         name TEXT,
@@ -198,10 +219,25 @@ export function ensureSchema() {
         ['confidence', 'TEXT'], ['signals_json', 'TEXT'], ['evidence_json', 'TEXT'],
         ['score_breakdown', 'TEXT'], ['contact_profile_url', 'TEXT'], ['contact_source_url', 'TEXT'],
         ['contact_reason', 'TEXT'], ['recommended_approach', 'TEXT'], ['search_run_id', 'TEXT'],
+        ['unknown_signals_json', 'TEXT'], ['why_now_json', 'TEXT'],
+        ['recommended_conversation', 'TEXT'], ['best_opportunity', 'TEXT'],
       ] as const;
       for (const [name, type] of additions) {
         if (!names.has(name)) await db.execute(`ALTER TABLE prospects ADD COLUMN ${name} ${type}`);
       }
+      const searchColumns = await db.execute('PRAGMA table_info("search_runs")');
+      const searchNames = new Set(searchColumns.rows.map((column) => String(column.name)));
+      const searchAdditions = [
+        ['parent_run_id', 'TEXT'], ['discovery_session_id', 'TEXT'],
+        ['request_type', "TEXT DEFAULT 'NEW_DISCOVERY_REQUEST'"], ['status', "TEXT DEFAULT 'COMPLETED'"],
+      ] as const;
+      for (const [name, type] of searchAdditions) {
+        if (!searchNames.has(name)) await db.execute(`ALTER TABLE search_runs ADD COLUMN ${name} ${type}`);
+      }
+      await db.execute(`
+        INSERT OR IGNORE INTO search_run_results (run_id, prospect_id, rank)
+        SELECT search_run_id, id, 0 FROM prospects WHERE search_run_id IS NOT NULL
+      `);
     }).catch((error) => {
       schemaPromise = undefined;
       throw error;
@@ -251,6 +287,8 @@ export const dbService = {
       data.confidence || null, data.signals_json || null, data.evidence_json || null,
       data.score_breakdown || null, data.contact_profile_url || null, data.contact_source_url || null,
       data.contact_reason || null, data.recommended_approach || null, data.search_run_id || null,
+      data.unknown_signals_json || null, data.why_now_json || null,
+      data.recommended_conversation || null, data.best_opportunity || null,
     ];
     await getTursoClient().execute({
       sql: `INSERT INTO prospects (
@@ -258,8 +296,9 @@ export const dbService = {
         location, industry, contract_intel, icp_score, icp_reasoning, outreach_angle,
         source_urls, research_brief, status, stage, employee_count, revenue_range,
         company_description, confidence, signals_json, evidence_json, score_breakdown,
-        contact_profile_url, contact_source_url, contact_reason, recommended_approach, search_run_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        contact_profile_url, contact_source_url, contact_reason, recommended_approach, search_run_id,
+        unknown_signals_json, why_now_json, recommended_conversation, best_opportunity
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(domain) DO UPDATE SET
         company_name=excluded.company_name, website=excluded.website, location=excluded.location,
         industry=excluded.industry, contract_intel=excluded.contract_intel,
@@ -271,6 +310,8 @@ export const dbService = {
         score_breakdown=excluded.score_breakdown, contact_profile_url=excluded.contact_profile_url,
         contact_source_url=excluded.contact_source_url, contact_reason=excluded.contact_reason,
         recommended_approach=excluded.recommended_approach, search_run_id=excluded.search_run_id,
+        unknown_signals_json=excluded.unknown_signals_json, why_now_json=excluded.why_now_json,
+        recommended_conversation=excluded.recommended_conversation, best_opportunity=excluded.best_opportunity,
         updated_at=CURRENT_TIMESTAMP`,
       args,
     });
@@ -340,8 +381,12 @@ export const dbService = {
   async addSearchRun(data: Omit<SearchRun, 'created_at'>): Promise<SearchRun> {
     await ensureSchema();
     await getTursoClient().execute({
-      sql: 'INSERT INTO search_runs (id, user_email, query, intent_json, result_count) VALUES (?, ?, ?, ?, ?)',
-      args: [data.id, data.user_email, data.query, data.intent_json, data.result_count],
+      sql: `INSERT INTO search_runs
+        (id, user_email, query, intent_json, result_count, parent_run_id, discovery_session_id, request_type, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      args: [data.id, data.user_email, data.query, data.intent_json, data.result_count,
+        data.parent_run_id || null, data.discovery_session_id || data.id,
+        data.request_type || 'NEW_DISCOVERY_REQUEST', data.status || 'COMPLETED'],
     });
     const result = await getTursoClient().execute({ sql: 'SELECT * FROM search_runs WHERE id = ?', args: [data.id] });
     return row<SearchRun>(result.rows[0]);
@@ -354,6 +399,34 @@ export const dbService = {
       args: [userEmail],
     });
     return result.rows.map((item) => row<SearchRun>(item));
+  },
+
+  async linkProspectToSearchRun(runId: string, prospectId: string, rank: number) {
+    await ensureSchema();
+    await getTursoClient().execute({
+      sql: 'INSERT OR IGNORE INTO search_run_results (run_id, prospect_id, rank) VALUES (?, ?, ?)',
+      args: [runId, prospectId, rank],
+    });
+  },
+
+  async getSearchRun(userEmail: string, id: string): Promise<{ search: SearchRun; prospects: Prospect[] } | null> {
+    await ensureSchema();
+    const searchResult = await getTursoClient().execute({
+      sql: 'SELECT * FROM search_runs WHERE id = ? AND user_email = ?',
+      args: [id, userEmail],
+    });
+    if (!searchResult.rows[0]) return null;
+    const prospectResult = await getTursoClient().execute({
+      sql: `SELECT prospects.* FROM prospects
+        INNER JOIN search_run_results ON search_run_results.prospect_id = prospects.id
+        WHERE search_run_results.run_id = ?
+        ORDER BY search_run_results.rank ASC, prospects.icp_score DESC`,
+      args: [id],
+    });
+    return {
+      search: row<SearchRun>(searchResult.rows[0]),
+      prospects: prospectResult.rows.map((item) => row<Prospect>(item)),
+    };
   },
 };
 

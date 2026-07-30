@@ -8,7 +8,9 @@ if (!url || !authToken) {
 }
 
 const client = createClient({ url, authToken });
-const hostname = new URL(url.replace('libsql://', 'https://')).hostname;
+const hostname = url.startsWith('file:')
+  ? 'local-file-database'
+  : new URL(url.replace('libsql://', 'https://')).hostname;
 const existingTables = await client.execute(
   "SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name"
 );
@@ -28,6 +30,17 @@ await client.execute(`
 await client.execute(
   'CREATE INDEX IF NOT EXISTS search_runs_user_created_idx ON search_runs(user_email, created_at DESC)'
 );
+await client.execute(`
+  CREATE TABLE IF NOT EXISTS search_run_results (
+    run_id TEXT NOT NULL,
+    prospect_id TEXT NOT NULL,
+    rank INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (run_id, prospect_id),
+    FOREIGN KEY (run_id) REFERENCES search_runs(id) ON DELETE CASCADE,
+    FOREIGN KEY (prospect_id) REFERENCES prospects(id) ON DELETE CASCADE
+  )
+`);
 
 const additions = [
   ['employee_count', 'TEXT'],
@@ -42,6 +55,10 @@ const additions = [
   ['contact_reason', 'TEXT'],
   ['recommended_approach', 'TEXT'],
   ['search_run_id', 'TEXT'],
+  ['unknown_signals_json', 'TEXT'],
+  ['why_now_json', 'TEXT'],
+  ['recommended_conversation', 'TEXT'],
+  ['best_opportunity', 'TEXT'],
 ];
 
 const addedColumns = [];
@@ -51,6 +68,26 @@ for (const [name, type] of additions) {
     addedColumns.push(name);
   }
 }
+
+const searchColumnResult = await client.execute('PRAGMA table_info("search_runs")');
+const searchColumnNames = new Set(searchColumnResult.rows.map((column) => String(column.name)));
+const searchAdditions = [
+  ['parent_run_id', 'TEXT'],
+  ['discovery_session_id', 'TEXT'],
+  ['request_type', "TEXT DEFAULT 'NEW_DISCOVERY_REQUEST'"],
+  ['status', "TEXT DEFAULT 'COMPLETED'"],
+];
+const addedSearchColumns = [];
+for (const [name, type] of searchAdditions) {
+  if (!searchColumnNames.has(name)) {
+    await client.execute(`ALTER TABLE search_runs ADD COLUMN ${name} ${type}`);
+    addedSearchColumns.push(name);
+  }
+}
+await client.execute(`
+  INSERT OR IGNORE INTO search_run_results (run_id, prospect_id, rank)
+  SELECT search_run_id, id, 0 FROM prospects WHERE search_run_id IS NOT NULL
+`);
 
 const finalTables = await client.execute(
   "SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name"
@@ -62,5 +99,6 @@ console.log({
   tablesBefore: existingTables.rows.map((row) => String(row.name)),
   tablesAfter: finalTables.rows.map((row) => String(row.name)),
   addedColumns,
+  addedSearchColumns,
   existingProspectsPreserved: Number(prospectCount.rows[0].count),
 });
