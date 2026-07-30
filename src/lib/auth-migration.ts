@@ -1,18 +1,16 @@
 import { getTursoClient } from './db';
 
-const AUTH_MIGRATION_SQL = `
-  PRAGMA foreign_keys = ON;
-
-  CREATE TABLE IF NOT EXISTS "user" (
+const AUTH_MIGRATION_STATEMENTS = [
+  `CREATE TABLE IF NOT EXISTS "user" (
     "id" TEXT NOT NULL PRIMARY KEY,
     "name" TEXT,
     "email" TEXT,
     "emailVerified" INTEGER,
     "image" TEXT,
     CONSTRAINT "user_email_unique" UNIQUE ("email")
-  );
+  )`,
 
-  CREATE TABLE IF NOT EXISTS "account" (
+  `CREATE TABLE IF NOT EXISTS "account" (
     "userId" TEXT NOT NULL,
     "type" TEXT NOT NULL,
     "provider" TEXT NOT NULL,
@@ -26,23 +24,23 @@ const AUTH_MIGRATION_SQL = `
     "session_state" TEXT,
     CONSTRAINT "account_provider_providerAccountId_pk" PRIMARY KEY ("provider", "providerAccountId"),
     CONSTRAINT "account_userId_user_id_fk" FOREIGN KEY ("userId") REFERENCES "user" ("id") ON DELETE CASCADE
-  );
+  )`,
 
-  CREATE TABLE IF NOT EXISTS "session" (
+  `CREATE TABLE IF NOT EXISTS "session" (
     "sessionToken" TEXT NOT NULL PRIMARY KEY,
     "userId" TEXT NOT NULL,
     "expires" INTEGER NOT NULL,
     CONSTRAINT "session_userId_user_id_fk" FOREIGN KEY ("userId") REFERENCES "user" ("id") ON DELETE CASCADE
-  );
+  )`,
 
-  CREATE TABLE IF NOT EXISTS "verificationToken" (
+  `CREATE TABLE IF NOT EXISTS "verificationToken" (
     "identifier" TEXT NOT NULL,
     "token" TEXT NOT NULL,
     "expires" INTEGER NOT NULL,
     CONSTRAINT "verificationToken_identifier_token_pk" PRIMARY KEY ("identifier", "token")
-  );
+  )`,
 
-  CREATE TABLE IF NOT EXISTS "authenticator" (
+  `CREATE TABLE IF NOT EXISTS "authenticator" (
     "credentialID" TEXT NOT NULL,
     "userId" TEXT NOT NULL,
     "providerAccountId" TEXT NOT NULL,
@@ -54,14 +52,15 @@ const AUTH_MIGRATION_SQL = `
     CONSTRAINT "authenticator_userId_credentialID_pk" PRIMARY KEY ("userId", "credentialID"),
     CONSTRAINT "authenticator_credentialID_unique" UNIQUE ("credentialID"),
     CONSTRAINT "authenticator_userId_user_id_fk" FOREIGN KEY ("userId") REFERENCES "user" ("id") ON DELETE CASCADE
-  );
+  )`,
+  `CREATE INDEX IF NOT EXISTS "account_userId_idx" ON "account" ("userId")`,
+  `CREATE INDEX IF NOT EXISTS "session_userId_idx" ON "session" ("userId")`,
+  `CREATE INDEX IF NOT EXISTS "session_expires_idx" ON "session" ("expires")`,
+  `CREATE INDEX IF NOT EXISTS "verificationToken_expires_idx" ON "verificationToken" ("expires")`,
+  `CREATE INDEX IF NOT EXISTS "authenticator_userId_idx" ON "authenticator" ("userId")`,
+] as const;
 
-  CREATE INDEX IF NOT EXISTS "account_userId_idx" ON "account" ("userId");
-  CREATE INDEX IF NOT EXISTS "session_userId_idx" ON "session" ("userId");
-  CREATE INDEX IF NOT EXISTS "session_expires_idx" ON "session" ("expires");
-  CREATE INDEX IF NOT EXISTS "verificationToken_expires_idx" ON "verificationToken" ("expires");
-  CREATE INDEX IF NOT EXISTS "authenticator_userId_idx" ON "authenticator" ("userId");
-`;
+const AUTH_MIGRATION_SQL = AUTH_MIGRATION_STATEMENTS.map((statement) => `${statement};`).join('\n\n');
 
 const AUTH_TABLES = ['user', 'account', 'session', 'verificationToken', 'authenticator'] as const;
 let authMigrationPromise: Promise<void> | undefined;
@@ -77,7 +76,10 @@ export function productionDatabaseIdentity() {
 export async function ensureAuthSchema() {
   if (!authMigrationPromise) {
     authMigrationPromise = (async () => {
-      await getTursoClient().executeMultiple(AUTH_MIGRATION_SQL);
+      const db = getTursoClient();
+      for (const statement of AUTH_MIGRATION_STATEMENTS) {
+        await db.execute(statement);
+      }
       await verifyAuthSchema();
     })().catch((error) => {
       authMigrationPromise = undefined;
