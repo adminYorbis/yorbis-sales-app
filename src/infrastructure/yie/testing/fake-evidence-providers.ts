@@ -14,7 +14,7 @@ export class FakeEvidenceSearchProvider implements EvidenceSearchProvider {
       {providerResultId:'golden-official',url:'https://www.goldenstatefoods.example/about/?utm_source=test',title:'About Golden State Foods',snippet:'Golden State Foods LLC (Golden State Foods) is a California food distributor importing ingredients from Southeast Asia.',rank:1,sourceType:'COMPANY_WEBSITE' as const,relevance:.98},
       {providerResultId:'golden-directory',url:'https://directory.example/members/golden-state-foods?utm_campaign=x',title:'Member directory',snippet:'Golden State Foods LLC is a food distributor located in California. Sunrise Sauce is a product brand.',rank:2,sourceType:'INDUSTRY_DIRECTORY' as const,relevance:.9},
       {providerResultId:'similar',url:'https://goldenstatefoodproducts.example',title:'Golden State Food Products',snippet:'Golden State Food Products is a Nevada manufacturer.',rank:3,sourceType:'COMPANY_WEBSITE' as const,relevance:.75},
-    ].slice(0,input.maximumResults)},metadata:metadata('EXECUTE_SEARCH_QUERY')};
+    ].slice(0,input.maximumResults),groundingSourcesReceived:0,modelEmittedUrlsReceived:0,modelEmittedUrls:[]},metadata:metadata('EXECUTE_SEARCH_QUERY')};
   }
 }
 export class FakeCandidateExtractionProvider implements CandidateExtractionProvider {
@@ -36,3 +36,4 @@ export class FakeClaimExtractionProvider implements ClaimExtractionProvider {
     return {value,metadata:metadata('EXTRACT_PROPOSED_CLAIMS')};
   }
 }
+

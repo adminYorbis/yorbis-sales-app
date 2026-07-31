@@ -24,7 +24,7 @@ type GeminiSdkResult = {
   }>;
 };
 
-function createNeutralGeminiClient(apiKey: string): NeutralGeminiClient {
+export function createNeutralGeminiClient(apiKey: string): NeutralGeminiClient {
   const sdk = new GoogleGenAI({ apiKey });
   return {
     async generate(request) {

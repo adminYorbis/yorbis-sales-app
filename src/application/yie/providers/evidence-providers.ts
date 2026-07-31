@@ -8,10 +8,14 @@ export const SearchSourceProposalSchema = z.object({
   providerResultId: Text.optional(), url: z.url(), title: Text.optional(), publisher: Text.optional(),
   publishedAt: z.string().datetime({ offset: true }).optional(), snippet: z.string().trim().min(1).max(2000),
   rank: z.number().int().positive(), sourceType: SourceTypeSchema.default('OTHER_PUBLIC_SOURCE'),
-  relevance: z.number().min(0).max(1).optional(),
+  relevance: z.number().min(0).max(1).optional(), groundingSourceKey: Text.optional(),
+  groundingProvider: Text.optional(),
 }).strict();
 export const SearchQueryResultSchema = z.object({
   sources: z.array(SearchSourceProposalSchema).max(50),
+  groundingSourcesReceived: z.number().int().nonnegative().default(0),
+  modelEmittedUrlsReceived: z.number().int().nonnegative().default(0),
+  modelEmittedUrls: z.array(z.url()).max(100).default([]),
 }).strict();
 export type SearchQueryResult = z.infer<typeof SearchQueryResultSchema>;
 
