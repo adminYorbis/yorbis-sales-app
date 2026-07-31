@@ -1,5 +1,5 @@
 import { createClient } from '@libsql/client';
-import { POCKET_3_MIGRATIONS } from '../src/infrastructure/yie/persistence/migrations';
+import { ALL_YIE_MIGRATIONS } from '../src/infrastructure/yie/persistence/migrations';
 import { runYieMigrations } from '../src/infrastructure/yie/persistence/migration-runner';
 
 async function main() {
@@ -9,7 +9,7 @@ async function main() {
   const client = createClient(authToken ? { url, authToken } : { url });
   try {
     const dryRun = process.argv.includes('--dry-run');
-    const result = await runYieMigrations(client, POCKET_3_MIGRATIONS, { dryRun });
+    const result = await runYieMigrations(client, ALL_YIE_MIGRATIONS, { dryRun });
     console.log(JSON.stringify({ dryRun, plan: result.plan, applied: result.applied }, null, 2));
   } finally {
     client.close();
