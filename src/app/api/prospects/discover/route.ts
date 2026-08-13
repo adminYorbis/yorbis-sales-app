@@ -1,6 +1,5 @@
 import crypto from 'crypto';
 import { NextResponse } from 'next/server';
-import { GoogleGenAI } from '@google/genai';
 import { auth } from '@/auth';
 import { dbService } from '@/lib/db';
 import {
@@ -17,34 +16,14 @@ import { candidateRecords, DiscoveryError, extractJson, safeDiscoveryError } fro
 import { evaluateRequiredConstraints } from '@/lib/discovery-constraints';
 import { calculateFitScore } from '@/lib/prospect-scoring';
 
-const geminiApiKey = process.env.GEMINI_API_KEY;
 const serperApiKey = process.env.SERPER_API_KEY;
-const defaultModel = 'gemini-3.1-flash-lite';
-const configuredModel = process.env.GEMINI_MODEL?.trim();
-const selectedModel = !configuredModel || configuredModel.startsWith('gemini-2.0')
-  ? defaultModel
-  : configuredModel;
+const defaultModel = 'serper-grounding';
 
 export const maxDuration = 60;
 
 function generate(contents: string, withSearch = false) {
-  // Try Serper first; fall back to Gemini if Serper key unavailable
-  const serperResult = generateSerper(contents);
-  if (serperResult) return serperResult;
-  return generateGemini(contents, withSearch);
-}
-
-function generateGemini(contents: string, withSearch = false) {
-  if (!geminiApiKey) return null;
-  return new GoogleGenAI({ apiKey: geminiApiKey }).models.generateContent({
-    model: selectedModel,
-    contents,
-    config: {
-      ...(withSearch ? { tools: [{ googleSearch: {} }] } : {}),
-      maxOutputTokens: 16384,
-      temperature: 0.2,
-    },
-  });
+  // Use Serper for all search (no Gemini fallback)
+  return generateSerper(contents);
 }
 
 function generateSerper(contents: string) {
@@ -156,11 +135,9 @@ export async function POST(request: Request) {
   try {
     const session = await auth();
     const userEmail = session?.user?.email;
-    if (!userEmail) return errorResponse(requestId, new DiscoveryError('DISCOVERY_REQUEST_INVALID', 'Authentication required.', 401));
-    // Check for Gemini key; fall back to Serper if available
-    const hasGeminiKey = !!geminiApiKey;
-    const hasSerperKey = !!serperApiKey;
-    if (!hasGeminiKey && !hasSerperKey) return errorResponse(requestId, new DiscoveryError('DISCOVERY_REQUEST_FAILED', 'Neither Gemini nor Serper search is configured.', 503));
+if (!userEmail) return errorResponse(requestId, new DiscoveryError('DISCOVERY_REQUEST_INVALID', 'Authentication required.', 401));
+// Check for Serper key
+    if (!serperApiKey) return errorResponse(requestId, new DiscoveryError('DISCOVERY_REQUEST_FAILED', 'Serper search is not configured.', 503));
 
     const body = await request.json() as {
       action?: 'interpret' | 'discover';
@@ -299,15 +276,12 @@ Return only valid JSON:
 "contact_reason":"why this role is appropriate for the company size and use case"
 }]}`;
 
-    log(requestId, 'gemini_request_started', { model: selectedModel });
+    log(requestId, 'search_started', { model: defaultModel });
     const result = await generate(prompt, true);
     const text = result.text || '';
-    const groundingMetadata = result.candidates?.[0]?.groundingMetadata;
-    log(requestId, 'gemini_request_completed', {
+    log(requestId, 'search_completed', {
       responseType: typeof text,
       responseLength: text.length,
-      groundingSourceCount: groundingMetadata?.groundingChunks?.length || 0,
-      groundingQueryCount: groundingMetadata?.webSearchQueries?.length || 0,
       ...(process.env.NODE_ENV === 'development' ? { preview: text.slice(0, 160) } : {}),
     });
     let parsed: unknown;
