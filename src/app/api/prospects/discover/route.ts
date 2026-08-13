@@ -50,14 +50,63 @@ function generateGemini(contents: string, withSearch = false) {
 function generateSerper(contents: string) {
   if (!serperApiKey) return null;
   // Use fetch to call Serper API
-  // Return a simplified response format
-  return {
-    text: JSON.stringify({
-      companies: [],
-      // Would contain Serper results if fully integrated
+  return fetch('https://google.serper.dev/search', {
+    method: 'POST',
+    headers: {
+      'X-API-KEY': serperApiKey,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      q: contents,
+      gl: 'us',
+      hl: 'en',
+      num: 10,
     }),
-    candidates: [],
-  };
+  })
+    .then((res) => {
+      if (!res.ok) throw new Error(`Serper API ${res.status}`);
+      return res.json();
+    })
+    .then((data) => {
+      const organic = data.organic ?? [];
+      const companies = organic.map((r: any) => ({
+        company_name: r.title || r.domain || 'Unknown',
+        website: r.link || '',
+        location: '',
+        industry: 'Unknown',
+        employee_count: 'Unknown',
+        revenue_range: 'Unknown',
+        company_description: r.snippet || '',
+        confidence: 'MEDIUM',
+        recommendation_summary: 'Found via web search',
+        best_opportunity: 'Payments and collections',
+        sources: [{
+          id: 's1',
+          title: r.title || 'Serper Result',
+          url: r.link || '',
+          publishedDate: '',
+          evidenceSummary: r.snippet || '',
+        }],
+        signals: [{ label: 'supplier', description: 'Found via search', status: 'VERIFIED', category: 'vendor-payment' }],
+        why_now: [{ label: 'Found via search', description: 'Available via web search', date: '', sourceIds: ['s1'] }],
+        contact_name: null,
+        contact_title: null,
+        contact_email: null,
+        contact_profile_url: null,
+        contact_reason: null,
+      })).slice(0, 8);
+
+      return {
+        text: JSON.stringify({ companies }),
+        candidates: organic.map((r: any) => ({
+          groundingMetadata: { groundingChunks: [], webSearchQueries: [] },
+        })),
+      };
+    })
+    .catch((error) => {
+      console.error('Serper search error:', error);
+      return null;
+    });
 }
 
 function log(requestId: string, stage: string, details: Record<string, unknown> = {}) {
