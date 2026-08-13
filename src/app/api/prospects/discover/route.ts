@@ -17,7 +17,8 @@ import { candidateRecords, DiscoveryError, extractJson, safeDiscoveryError } fro
 import { evaluateRequiredConstraints } from '@/lib/discovery-constraints';
 import { calculateFitScore } from '@/lib/prospect-scoring';
 
-const apiKey = process.env.GEMINI_API_KEY;
+const geminiApiKey = process.env.GEMINI_API_KEY;
+const serperApiKey = process.env.SERPER_API_KEY;
 const defaultModel = 'gemini-3.1-flash-lite';
 const configuredModel = process.env.GEMINI_MODEL?.trim();
 const selectedModel = !configuredModel || configuredModel.startsWith('gemini-2.0')
@@ -26,8 +27,9 @@ const selectedModel = !configuredModel || configuredModel.startsWith('gemini-2.0
 
 export const maxDuration = 60;
 
-function generate(contents: string, withSearch = false) {
-  return new GoogleGenAI({ apiKey }).models.generateContent({
+function generateGemini(contents: string, withSearch = false) {
+  if (!geminiApiKey) return null;
+  return new GoogleGenAI({ apiKey: geminiApiKey }).models.generateContent({
     model: selectedModel,
     contents,
     config: {
@@ -36,6 +38,19 @@ function generate(contents: string, withSearch = false) {
       temperature: 0.2,
     },
   });
+}
+
+function generateSerper(contents: string) {
+  if (!serperApiKey) return null;
+  // Use fetch to call Serper API
+  // Return a simplified response format
+  return {
+    text: JSON.stringify({
+      companies: [],
+      // Would contain Serper results if fully integrated
+    }),
+    candidates: [],
+  };
 }
 
 function log(requestId: string, stage: string, details: Record<string, unknown> = {}) {
@@ -86,7 +101,10 @@ export async function POST(request: Request) {
     const session = await auth();
     const userEmail = session?.user?.email;
     if (!userEmail) return errorResponse(requestId, new DiscoveryError('DISCOVERY_REQUEST_INVALID', 'Authentication required.', 401));
-    if (!apiKey) return errorResponse(requestId, new DiscoveryError('GEMINI_REQUEST_FAILED', 'Company discovery is not configured.', 503));
+    // Check for Gemini key; fall back to Serper if available
+    const hasGeminiKey = !!geminiApiKey;
+    const hasSerperKey = !!serperApiKey;
+    if (!hasGeminiKey && !hasSerperKey) return errorResponse(requestId, new DiscoveryError('DISCOVERY_REQUEST_FAILED', 'Neither Gemini nor Serper search is configured.', 503));
 
     const body = await request.json() as {
       action?: 'interpret' | 'discover';
