@@ -27,6 +27,13 @@ const selectedModel = !configuredModel || configuredModel.startsWith('gemini-2.0
 
 export const maxDuration = 60;
 
+function generate(contents: string, withSearch = false) {
+  // Try Serper first; fall back to Gemini if Serper key unavailable
+  const serperResult = generateSerper(contents);
+  if (serperResult) return serperResult;
+  return generateGemini(contents, withSearch);
+}
+
 function generateGemini(contents: string, withSearch = false) {
   if (!geminiApiKey) return null;
   return new GoogleGenAI({ apiKey: geminiApiKey }).models.generateContent({
