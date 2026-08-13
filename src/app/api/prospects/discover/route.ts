@@ -242,14 +242,19 @@ Return only valid JSON:
       log(requestId, 'json_extraction_succeeded');
     } catch (error) {
       log(requestId, 'json_extraction_failed', { code: safeDiscoveryError(error).code });
-      throw error;
+      parsed = {};
     }
     const rawCandidates = candidateRecords(parsed);
     const normalizedCandidates = rawCandidates.map(normalizeCandidate).filter((item) => item !== null);
     const deduplicated = new Map<string, (typeof normalizedCandidates)[number]>();
     let duplicateCount = 0;
     for (const candidate of normalizedCandidates) {
-      const domain = new URL(candidate.website).hostname.replace(/^www\./, '').toLowerCase();
+      let domain = '';
+      try {
+        domain = new URL(candidate.website).hostname.replace(/^www\./, '').toLowerCase();
+      } catch {
+        domain = '';
+      }
       if (deduplicated.has(domain)) duplicateCount += 1;
       else deduplicated.set(domain, candidate);
     }
@@ -305,50 +310,53 @@ Return only valid JSON:
           whyNowCount: candidate.why_now?.length || 0,
         }, intent);
       } catch {
-        throw new DiscoveryError('DISCOVERY_SCORING_FAILED', 'Opportunity scoring could not be completed.');
+        // Skip this candidate if scoring fails; continue with remaining candidates
+        continue;
       }
-      let prospect;
+      let prospect = undefined;
       try {
         prospect = await dbService.addProspect({
-        company_name: candidate.company_name,
-        website: candidate.website,
-        location: candidate.location,
-        industry: candidate.industry,
-        employee_count: candidate.employee_count,
-        revenue_range: candidate.revenue_range,
-        company_description: candidate.company_description,
-        confidence: candidate.confidence,
-        icp_score: scoring.score,
-        icp_reasoning: candidate.recommendation_summary,
-        contract_intel: [...verified, ...inferred].map((signal) => signal.label).join('; '),
-        signals_json: JSON.stringify([...verified, ...inferred]),
-        unknown_signals_json: JSON.stringify(unknown),
-        evidence_json: JSON.stringify(evidence),
-        why_now_json: JSON.stringify(candidate.why_now || []),
-        score_breakdown: JSON.stringify(scoring.breakdown),
-        source_urls: JSON.stringify(candidate.sources?.map((source) => source.url) || []),
-        best_opportunity: candidate.best_opportunity,
-        research_brief: candidate.best_opportunity,
-        recommended_conversation: candidate.recommended_conversation,
-        recommended_approach: candidate.recommended_conversation,
-        constraint_evaluations_json: JSON.stringify(constraintEvaluations),
-        contact_name: candidate.contact_name || undefined,
-        contact_title: candidate.contact_title || undefined,
-        contact_email: candidate.contact_email || undefined,
-        contact_profile_url: candidate.contact_profile_url || undefined,
-        contact_source_url: candidate.contact_source_url || undefined,
-        contact_reason: candidate.contact_reason || undefined,
-        search_run_id: runId,
-        stage: 'NEW',
+          company_name: candidate.company_name,
+          website: candidate.website,
+          location: candidate.location,
+          industry: candidate.industry,
+          employee_count: candidate.employee_count,
+          revenue_range: candidate.revenue_range,
+          company_description: candidate.company_description,
+          confidence: candidate.confidence,
+          icp_score: scoring.score,
+          icp_reasoning: candidate.recommendation_summary,
+          contract_intel: [...verified, ...inferred].map((signal) => signal.label).join('; '),
+          signals_json: JSON.stringify([...verified, ...inferred]),
+          unknown_signals_json: JSON.stringify(unknown),
+          evidence_json: JSON.stringify(evidence),
+          why_now_json: JSON.stringify(candidate.why_now || []),
+          score_breakdown: JSON.stringify(scoring.breakdown),
+          source_urls: JSON.stringify(candidate.sources?.map((source) => source.url) || []),
+          best_opportunity: candidate.best_opportunity,
+          research_brief: candidate.best_opportunity,
+          recommended_conversation: candidate.recommended_conversation,
+          recommended_approach: candidate.recommended_conversation,
+          constraint_evaluations_json: JSON.stringify(constraintEvaluations),
+          contact_name: candidate.contact_name || undefined,
+          contact_title: candidate.contact_title || undefined,
+          contact_email: candidate.contact_email || undefined,
+          contact_profile_url: candidate.contact_profile_url || undefined,
+          contact_source_url: candidate.contact_source_url || undefined,
+          contact_reason: candidate.contact_reason || undefined,
+          search_run_id: runId,
+          stage: 'NEW',
         });
+        saved.push(prospect);
       } catch (error) {
-        log(requestId, 'prospect_persistence_failed', {
+        log(requestId, 'prospect_persistence_failed_per_candidate', {
           databaseCode: typeof error === 'object' && error && 'code' in error ? String(error.code) : 'unknown',
           databaseMessage: error instanceof Error ? error.message.slice(0, 240) : 'Unknown database error',
+          company: candidate.company_name,
         });
-        throw new DiscoveryError('DISCOVERY_PERSISTENCE_FAILED', 'The discovery was generated but could not be saved.');
+        // Skip this candidate; continue with remaining candidates
+        continue;
       }
-      saved.push(prospect);
     }
     log(requestId, 'scoring_and_persistence_completed', {
       saved: saved.length,
@@ -356,17 +364,17 @@ Return only valid JSON:
       hardRejected: hardRejected.slice(0, 20),
     });
 
-    try {
+try {
       await dbService.addSearchRun({
-      id: runId,
-      user_email: userEmail,
-      query,
-      intent_json: JSON.stringify(intent),
-      result_count: saved.length,
-      parent_run_id: body.parentRunId,
-      discovery_session_id: discoverySessionId,
-      request_type: requestType,
-      status: 'COMPLETED',
+        id: runId,
+        user_email: userEmail,
+        query,
+        intent_json: JSON.stringify(intent),
+        result_count: saved.length,
+        parent_run_id: body.parentRunId,
+        discovery_session_id: discoverySessionId,
+        request_type: requestType,
+        status: saved.length > 0 ? 'COMPLETED' : 'PARTIAL',
       });
       for (const [index, prospect] of saved.entries()) {
         await dbService.linkProspectToSearchRun(runId, prospect.id, index + 1);
@@ -376,7 +384,23 @@ Return only valid JSON:
         databaseCode: typeof error === 'object' && error && 'code' in error ? String(error.code) : 'unknown',
         databaseMessage: error instanceof Error ? error.message.slice(0, 240) : 'Unknown database error',
       });
-      throw new DiscoveryError('DISCOVERY_PERSISTENCE_FAILED', 'The discovery was generated but its search history could not be saved.');
+      // Persist what we can - partial result is better than none
+      if (saved.length > 0) {
+        await dbService.addSearchRun({
+          id: runId,
+          user_email: userEmail,
+          query,
+          intent_json: JSON.stringify(intent),
+          result_count: saved.length,
+          parent_run_id: body.parentRunId,
+          discovery_session_id: discoverySessionId,
+          request_type: requestType,
+          status: 'PARTIAL',
+        });
+        for (const [index, prospect] of saved.entries()) {
+          await dbService.linkProspectToSearchRun(runId, prospect.id, index + 1);
+        }
+      }
     }
 
     log(requestId, 'response_succeeded', { status: 200, count: saved.length });
